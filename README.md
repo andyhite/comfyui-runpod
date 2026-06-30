@@ -6,8 +6,10 @@ declaratively.
 
 ## How it works
 
-- **Custom image** (`Dockerfile`) — a thin wrapper over `runpod/comfyui:cuda13.0`
-  that adds `entrypoint.sh`. Rebuilt only when `entrypoint.sh` changes.
+- **Custom image** (`Dockerfile`) — a thin wrapper over `runpod/comfyui:cuda12.8`
+  that adds `entrypoint.sh`. Rebuilt only when `entrypoint.sh` changes. (CUDA 12.8,
+  not 13.0: most cheap RunPod hosts have 12.8 drivers, and a 13.0 image crashes
+  with "driver too old" on them.)
 - **`pod/` payload**, synced to the pod on every `make up` via dstack `files:`:
   - `pod/snapshot.json` — a **ComfyUI-Manager snapshot**: your custom nodes, pinned
     to commits, with their pip deps. Restored at boot (`cm-cli restore-snapshot`).

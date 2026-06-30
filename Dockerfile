@@ -14,8 +14,11 @@
 # The bake also writes the snapshot's checksum as the entrypoint's idempotency
 # marker, so an unchanged snapshot skips restore-snapshot entirely at boot.
 #
-# RunPod runs x86_64 — always build for linux/amd64 (the Makefile does this).
-FROM runpod/comfyui:cuda13.0
+# Base is the CUDA 12.8 variant, NOT 13.0: most cheap RunPod hosts ship 12.8
+# drivers (CUDA 13 needs driver >= 580), so a cuda13.0 image crashes with
+# "NVIDIA driver too old (found 12080)". 12.8 matches the fleet; CUDA 13 buys
+# nothing for WAN/Flux. RunPod runs x86_64 — always build for linux/amd64.
+FROM runpod/comfyui:cuda12.8
 
 COPY entrypoint.sh /usr/local/bin/dstack-entry.sh
 RUN chmod +x /usr/local/bin/dstack-entry.sh
