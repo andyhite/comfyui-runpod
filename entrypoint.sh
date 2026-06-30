@@ -70,10 +70,19 @@ if [ -f "$SNAP" ]; then
   fi
 fi
 
-# 3) Lay in the user dir uploaded via `files:`.
+# 3) User dir (workflows, __manager/config.ini, comfy settings, etc.):
+#    - the repo's `files:` copy is the BASELINE/seed (version-controlled)
+#    - the R2 copy is your LIVE state (edits made on previous pods), overlaid
+#      ON TOP so changes persist instead of being reset to the committed version.
+#    The __manager/cache is large and regenerable, so it's excluded from R2.
 if [ -d "$UPLOADS/user" ]; then
-  log "syncing user dir (workflows + __manager config)..."
+  log "seeding user dir from repo (baseline)..."
   cp -r "$UPLOADS/user/." "$COMFY_DIR/user/" 2>/dev/null || true
+fi
+if [ "$R2" = 1 ]; then
+  log "overlaying live user dir from R2 (your saved edits win)..."
+  rclone copy "r2:$R2_BUCKET/user" "$COMFY_DIR/user" \
+    --exclude "__manager/cache/**" 2>/dev/null || true
 fi
 
 # 4) Models in the BACKGROUND: R2 cache -> origin (HF) -> cache up to R2.
@@ -82,6 +91,7 @@ fi
 MANIFEST="$UPLOADS/models.txt"
 if [ -f "$MANIFEST" ]; then
   log "starting model downloads in background (watch the [models] log lines)..."
+  DONE_MARK=/tmp/.models-done; rm -f "$DONE_MARK"
   (
     while read -r dir url; do
       [ -z "${dir:-}" ] && continue
@@ -102,28 +112,54 @@ if [ -f "$MANIFEST" ]; then
       [ -n "${HF_TOKEN:-}" ] && hdr=(--header="Authorization: Bearer $HF_TOKEN")
       if wget -q "${hdr[@]}" -c -O "$dest.part" "$url"; then
         mv "$dest.part" "$dest"; echo "[models] origin done -> $fn"
-        # (c) cache up to R2 for next boot
-        if [ "$R2" = 1 ]; then
-          rclone copyto "$dest" "r2:$R2_BUCKET/models/$dir/$fn" 2>/dev/null \
-            && echo "[models] cached to R2 -> $fn" \
-            || echo "[models] R2 cache upload failed (non-fatal) -> $fn"
-        fi
+        # Caching to R2 is handled by the background sync below — NOT inline,
+        # so a slow 28GB upload never blocks the next download.
       else
         echo "[models] FAILED $fn — gated? check HF_TOKEN and license acceptance"
         rm -f "$dest.part"
       fi
     done < "$MANIFEST"
     echo "[models] all downloads complete"
+    touch "$DONE_MARK"
   ) &
+
+  # Heartbeat: every 30s, report files-done + bytes-on-disk so a long silent
+  # transfer (R2 pull or origin download) clearly still looks alive.
+  ( while [ ! -f "$DONE_MARK" ]; do
+      sleep 30
+      n="$(find "$COMFY_DIR/models" -type f ! -name '*.part*' 2>/dev/null | wc -l | tr -d ' ')"
+      cur="$(ls -S "$COMFY_DIR"/models/*/*.part* 2>/dev/null | head -1)"
+      msg="$n files, $(du -sh "$COMFY_DIR/models" 2>/dev/null | cut -f1) on disk"
+      [ -n "$cur" ] && msg="$msg; fetching $(basename "$cur") @ $(du -h "$cur" 2>/dev/null | cut -f1)"
+      echo "[models] ...still working — $msg"
+    done ) &
+
+  # Cache completed models up to R2 in the BACKGROUND (incremental; skips
+  # in-progress *.part* files). Stops after downloads finish, with a final pass.
+  if [ "$R2" = 1 ]; then
+    ( while [ ! -f "$DONE_MARK" ]; do
+        rclone copy "$COMFY_DIR/models" "r2:$R2_BUCKET/models" \
+          --exclude "*.part*" --no-traverse 2>/dev/null
+        sleep 120
+      done
+      rclone copy "$COMFY_DIR/models" "r2:$R2_BUCKET/models" \
+        --exclude "*.part*" --no-traverse 2>/dev/null
+      echo "[models] R2 cache seeding complete"
+    ) &
+  fi
 fi
 
-# 5) Persist outputs to R2 in the background (incremental, every 30s). Up to the
-#    last 30s of outputs may not sync on an abrupt stop.
+# 5) Persist outputs + live user-dir edits to R2 in the background (every 30s).
+#    Up to the last 30s may not sync on an abrupt stop. Both are additive copies
+#    (rclone copy, not sync) — deletions/renames don't propagate to R2, so prune
+#    R2 manually if you remove a workflow.
 if [ "$R2" = 1 ]; then
   OUT="$COMFY_DIR/output"; mkdir -p "$OUT"
-  log "syncing outputs -> r2:$R2_BUCKET/outputs every 30s..."
+  log "syncing outputs -> r2:$R2_BUCKET/outputs and user dir -> r2:$R2_BUCKET/user every 30s..."
   ( while true; do
       rclone copy "$OUT" "r2:$R2_BUCKET/outputs" --no-traverse 2>/dev/null
+      rclone copy "$COMFY_DIR/user" "r2:$R2_BUCKET/user" \
+        --exclude "__manager/cache/**" --no-traverse 2>/dev/null
       sleep 30
     done ) &
 fi

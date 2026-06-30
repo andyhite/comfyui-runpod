@@ -58,6 +58,11 @@ Generate `pod/snapshot.json` from a working setup: `make snapshot-help`.
     downloads from origin and caches back up. First boot seeds R2 (slow); later
     boots are fast (free egress, gated model no longer needs the token).
   - **Outputs** (`r2://comfyui/outputs`): synced every 30s so they survive teardown.
+  - **User dir** (`r2://comfyui/user`): workflows, `__manager/config.ini`, comfy
+    settings — the repo's `pod/user` is the baseline seed, the R2 copy (your live
+    edits) is overlaid on top at boot and pushed every 30s, so workflow/config
+    changes persist instead of resetting to the committed version. Additive copy,
+    so deletions don't propagate (prune R2 manually). `__manager/cache` excluded.
   - rclone (in the image) is configured via `RCLONE_CONFIG_R2_*` env from dstack
     secrets. No R2 secrets → models from origin only, outputs not persisted.
 
