@@ -17,5 +17,6 @@ idle_duration: 1h
 
 resources:
   gpu: 24GB..48GB
-  # Room for the image + nodes + model downloads (no volume; disk is ephemeral).
-  disk: 100GB..
+  # ~100GB of fp16 models download to ephemeral disk each boot (no volume),
+  # plus image + ComfyUI + outputs — must match the task's disk requirement.
+  disk: 200GB..

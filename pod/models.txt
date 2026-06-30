@@ -1,0 +1,24 @@
+# Model download manifest — synced to the pod via files:, downloaded at boot.
+# Format:  <models/ subdir>   <download URL>
+# '#' lines and blank lines are ignored. Files already present are skipped.
+# Filename = the last path segment of the URL.
+#
+# Gated repos need HF_TOKEN (set as a dstack secret) AND license acceptance on
+# the HF model page. Flux.2 Klein 9B is gated; everything else is public.
+
+# --- WAN 2.2 14B i2v (Comfy-Org repackages) ---
+diffusion_models   https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_i2v_high_noise_14B_fp16.safetensors
+diffusion_models   https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/diffusion_models/wan2.2_i2v_low_noise_14B_fp16.safetensors
+text_encoders      https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/text_encoders/umt5_xxl_fp16.safetensors
+clip_vision        https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/clip_vision/clip_vision_h.safetensors
+vae                https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors
+loras              https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors
+loras              https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/resolve/main/split_files/loras/wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors
+
+# --- Pixel-art sprite animate adapter (a LoRA, despite the name) ---
+loras              https://huggingface.co/styly-agents/Wan2-2-pixel-animate/resolve/main/wan2.2_animate_adapter_model.safetensors
+
+# --- Flux.2 Klein 9B (the diffusion model is GATED — needs HF_TOKEN + license) ---
+diffusion_models   https://huggingface.co/black-forest-labs/FLUX.2-klein-9B/resolve/main/flux-2-klein-9b.safetensors
+text_encoders      https://huggingface.co/Comfy-Org/flux2-klein/resolve/main/split_files/text_encoders/qwen_3_4b.safetensors
+vae                https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/vae/flux2-vae.safetensors

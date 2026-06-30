@@ -14,10 +14,17 @@ max_price: 1.20
 
 # Sync the small declarative bits to the pod on every `apply`. They stage at
 # /opt/uploads; the image entrypoint lays them into ComfyUI at boot. Updating
-# nodes (snapshot.json), workflows, or config needs NO image rebuild.
+# nodes (snapshot.json), workflows, config, or the model list needs NO rebuild.
 files:
   - ./pod/snapshot.json:/opt/uploads/snapshot.json
   - ./pod/user:/opt/uploads/user
+  - ./pod/models.txt:/opt/uploads/models.txt
+
+# HF token for gated downloads (Flux.2 Klein 9B). Set it once:
+#   dstack secret set HF_TOKEN <your_hf_token>
+# and accept the license at huggingface.co/black-forest-labs/FLUX.2-klein-9B.
+env:
+  - HF_TOKEN=${{ secrets.HF_TOKEN }}
 
 # Web UIs forwarded to localhost:
 #   ComfyUI     -> http://localhost:8188
@@ -33,7 +40,9 @@ resources:
   # 24-48GB cards: A40 48GB (~$0.44), A5000 24GB (~$0.27), etc.
   # dstack picks the cheapest match under max_price.
   gpu: 24GB..48GB
-  disk: 100GB..
+  # ~100GB of fp16 models (WAN 14B hi/lo + Klein 9B + encoders) live on
+  # ephemeral disk with no volume, so leave headroom for ComfyUI + outputs.
+  disk: 200GB..
 
 # Auto-stop the pod if the GPU sits below 10% for a full hour — i.e. you
 # finished generating and walked away. The base image won't stop itself

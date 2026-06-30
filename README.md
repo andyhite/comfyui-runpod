@@ -47,8 +47,11 @@ Generate `pod/snapshot.json` from a working setup: `make snapshot-help`.
   *delta* between the baked snapshot and the current one. Keep it small by
   re-baking (`make image-build`) when you've accumulated node changes. (Building on
   an Apple-silicon Mac uses amd64 emulation, so the bake step is slower there.)
-- **Models** — *not handled yet.* Download on the pod as needed (ComfyUI-Manager
-  "Install Missing Models" covers models in its DB; others need a manifest).
+- **Models** — declared in `pod/models.txt` (`<models/ subdir>  <URL>`), synced via
+  `files:`, downloaded at boot in the background (idempotent). Gated repos (Flux.2
+  Klein 9B) need an HF token: `dstack secret set HF_TOKEN <token>` and accept the
+  license at huggingface.co/black-forest-labs/FLUX.2-klein-9B. ~100 GB re-downloads
+  on every cold boot (no volume) — the main argument for Phase 2 (R2 cache).
 - **Outputs / persistence** — *not handled yet.* No network volume, so outputs are
   on ephemeral disk. Download via the UI before `make down`, or wire object-storage
   sync (R2/S3).

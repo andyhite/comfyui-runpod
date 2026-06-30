@@ -56,5 +56,35 @@ if [ -d "$UPLOADS/user" ]; then
   cp -r "$UPLOADS/user/." "$COMFY_DIR/user/" 2>/dev/null || true
 fi
 
+# 4) Download models from the synced manifest, in the BACKGROUND, so ComfyUI
+#    comes up immediately and models stream in (refresh the model dropdowns as
+#    they finish). Idempotent: skips files already on disk. Gated repos (Flux.2
+#    Klein 9B) need HF_TOKEN — passed as an Authorization header when set.
+MANIFEST="$UPLOADS/models.txt"
+if [ -f "$MANIFEST" ]; then
+  log "starting model downloads in background (watch the [models] log lines)..."
+  (
+    while read -r dir url; do
+      [ -z "${dir:-}" ] && continue
+      case "$dir" in \#*) continue ;; esac
+      [ -z "${url:-}" ] && continue
+      fn="${url##*/}"
+      dest="$COMFY_DIR/models/$dir/$fn"
+      if [ -s "$dest" ]; then echo "[models] have $fn"; continue; fi
+      mkdir -p "$COMFY_DIR/models/$dir"
+      echo "[models] downloading $fn -> models/$dir"
+      hdr=()
+      [ -n "${HF_TOKEN:-}" ] && hdr=(--header="Authorization: Bearer $HF_TOKEN")
+      if wget -q "${hdr[@]}" -c -O "$dest.part" "$url"; then
+        mv "$dest.part" "$dest"; echo "[models] done $fn"
+      else
+        echo "[models] FAILED $fn — gated? check HF_TOKEN and license acceptance"
+        rm -f "$dest.part"
+      fi
+    done < "$MANIFEST"
+    echo "[models] all downloads complete"
+  ) &
+fi
+
 log "handing off to /start.sh"
 exec /start.sh
