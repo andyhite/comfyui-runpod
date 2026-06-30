@@ -62,12 +62,14 @@ ports:
   - 8080
 
 resources:
-  # Whitelist CUDA-13-capable architectures (Ampere / Ada / Blackwell) so the
-  # cuda13 image runs. dstack can't filter by driver version — the entrypoint's
-  # CUDA preflight + the retry policy below handle the rare old-driver host.
-  # max_price filters the pricier ones (A100, RTXPRO6000); 24GB+ for WAN 14B.
+  # Whitelist only the architectures RunPod ships with the R580+ (CUDA 13)
+  # driver: Ada Lovelace, Hopper, Blackwell. NOT Ampere (A40/A100/A5000/RTX3090)
+  # — those stay on older drivers and would fail the CUDA preflight. dstack can't
+  # filter by driver, so the preflight + retry below catch any stragglers.
+  # max_price keeps the affordable ones (L4, RTXPRO4000/4500, RTX5090); the
+  # H100/H200/B200/RTXPRO6000 entries are only used if you raise max_price.
   gpu:
-    name: [A40, A100, A5000, L4, L40, L40S, RTX3090, RTX4090, RTX5090, RTXPRO4000, RTXPRO4500, RTXPRO6000]
+    name: [L40, L40S, RTX4090, RTX5090, RTXPRO4000, RTXPRO4500, RTXPRO6000, H100, H100NVL, H200, B200]
     memory: 24GB..
   # ~100GB of fp16 models (WAN 14B hi/lo + Klein 9B + encoders) live on
   # ephemeral disk with no volume, so leave headroom for ComfyUI + outputs.

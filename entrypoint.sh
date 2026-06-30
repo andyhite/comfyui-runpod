@@ -27,11 +27,15 @@ log() { echo "[dstack-entry] $*"; }
 # old to run it, bail immediately (exit non-zero) so dstack retries on another
 # host — it can't filter hosts by driver version, only GPU type. Doing this first
 # avoids wasting time populating ComfyUI and downloading ~100GB on a dead pod.
-if ! python3.12 -c "import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; then
-  log "CUDA unavailable — host driver likely too old for the cuda13 image. Exiting 1 so dstack retries another host."
+#
+# This forces a real CUDA allocation with the image's CUDA-13 torch — the same
+# op that would otherwise crash ComfyUI. On an old-driver host it raises
+# "driver is too old" and python exits non-zero; on a good host it's a no-op.
+if ! python3.12 -c "import torch; torch.zeros(1, device='cuda')" 2>/dev/null; then
+  log "CUDA 13 unusable on this host (driver too old?) — exiting 1 so dstack retries another host."
   exit 1
 fi
-log "CUDA preflight OK."
+log "CUDA 13 preflight OK."
 
 R2=0
 if [ -n "${RCLONE_CONFIG_R2_ACCESS_KEY_ID:-}" ] && [ -n "${R2_BUCKET:-}" ] && [ -n "${R2_ACCOUNT_ID:-}" ]; then
