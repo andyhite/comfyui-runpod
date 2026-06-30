@@ -31,6 +31,11 @@ files:
 # the pod still runs (models from origin, outputs not persisted).
 env:
   - HF_TOKEN=${{ secrets.HF_TOKEN }}
+  # Let pip find the image's CUDA-pinned torch wheel when ComfyUI-Manager (or the
+  # boot-time snapshot restore) installs a node that requires torch — otherwise
+  # pip only sees PyPI, can't satisfy the cu128 constraint, and fails with
+  # "ResolutionImpossible". Must match the image's CUDA build (cuda12.8 -> cu128).
+  - PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu128
   - R2_BUCKET=comfyui
   - R2_ACCOUNT_ID=${{ secrets.R2_ACCOUNT_ID }}
   - RCLONE_CONFIG_R2_TYPE=s3
