@@ -1,25 +1,26 @@
 type: task
 name: comfyui
 
-# RunPod's official ComfyUI image on CUDA 13.0
-image: runpod/comfyui:cuda13.0
+# Custom image = RunPod's ComfyUI base + our entrypoint (see Dockerfile).
+# Keep this in sync with IMAGE/TAG in the Makefile. If the image is private on
+# GHCR, either make the package public or add `registry_auth:` here.
+image: ghcr.io/andyhite/comfyui-runpod:latest
 
-# Pin to RunPod in EU-NL-1 so the network volume can attach
+# Region-agnostic: no network volume, so dstack picks the cheapest 24-48GB
+# CUDA-13 GPU anywhere on RunPod, on-demand, under $1.20/hr.
 backends: [runpod]
-regions: [EU-NL-1]
-
-# On-demand only (won't be reclaimed mid-generation), capped at $1.20/hr
-# so dstack stays in the cheap 24GB tier and never grabs a pricey card.
 spot_policy: on-demand
 max_price: 1.20
 
-# Mount the registered network volume. RunPod network volumes mount at
-# /workspace; the ComfyUI image keeps models/outputs there so they persist.
-volumes:
-  - name: comfyui-eu-nl-1
-    path: /workspace
+# Sync the small declarative bits to the pod on every `apply`. They stage at
+# /opt/uploads; the image entrypoint lays them into ComfyUI at boot. Updating
+# nodes (snapshot.json), workflows, or config needs NO image rebuild.
+files:
+  - ./pod/snapshot.json:/opt/uploads/snapshot.json
+  - ./pod/workflows:/opt/uploads/workflows
+  - ./pod/user:/opt/uploads/user
 
-# Forward the image's web UIs to your machine:
+# Web UIs forwarded to localhost:
 #   ComfyUI     -> http://localhost:8188
 #   JupyterLab  -> http://localhost:8888  (tokenless: JUPYTER_PASSWORD unset)
 #   FileBrowser -> http://localhost:8080  (default login admin / adminadmin12)
@@ -29,13 +30,14 @@ ports:
   - 8080
 
 resources:
-  # Cheapest GPU tier that handles WAN 2.2 14B i2v (the binding constraint;
-  # Flux.2 Klein 9B fits easily). 24GB = RTX 4090/3090/A5000 sweet spot.
-  # Bump the floor to 48GB.. if you OOM at higher res / longer clips.
+  # WAN 2.2 14B i2v is the binding constraint; Flux.2 Klein 9B fits easily.
+  # 24-48GB CUDA-13 cards: A40 48GB (~$0.44), A5000 24GB (~$0.27), etc.
+  # dstack picks the cheapest match under max_price.
   gpu: 24GB..48GB
   disk: 100GB..
 
-# No `commands`: dstack runs the image's own entrypoint. That start script
-# populates /workspace/runpod-slim/ComfyUI into the (initially empty) network
-# volume on first boot and launches ComfyUI on 8188 — overriding it here would
-# skip that sync and break first boot.
+# No `commands`: the custom image's entrypoint handles populate + snapshot
+# restore + workflow/config injection, then execs the base image's /start.sh.
+
+# NOTE: persistence is not wired yet. Without a volume, outputs live on ephemeral
+# disk — sync them out (object storage) or download via the UI before `make down`.

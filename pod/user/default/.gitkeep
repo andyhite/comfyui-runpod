@@ -1,0 +1,3 @@
+# Optional baseline ComfyUI user config (e.g. comfy.settings.json) goes under
+# pod/user/default/. It syncs to the pod via `files:` and merges into
+# /workspace/runpod-slim/ComfyUI/user/ on boot. Leave empty to use image defaults.

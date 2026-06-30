@@ -1,0 +1,5 @@
+# Keep the image build context tiny — only entrypoint.sh is needed (plus
+# pod/snapshot.json if you enable build-time baking in the Dockerfile).
+*
+!entrypoint.sh
+!pod/snapshot.json

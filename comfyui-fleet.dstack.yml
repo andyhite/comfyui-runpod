@@ -1,0 +1,21 @@
+type: fleet
+name: comfyui
+
+# A fleet is the instance pool the task provisions into. dstack 0.20.x won't
+# auto-create one for a task run, hence the "no fleets" error — this fixes that.
+
+# Region-agnostic (no network volume): any RunPod region, cheapest GPU wins.
+backends: [runpod]
+
+# On-demand only (no spot reclaim mid-generation).
+spot_policy: on-demand
+
+# nodes: 0..1 = provision the instance on demand when a run is submitted, and
+# scale back to 0 when idle so you don't pay between generations.
+nodes: 0..1
+idle_duration: 1h
+
+resources:
+  gpu: 24GB..48GB
+  # Room for the image + nodes + model downloads (no volume; disk is ephemeral).
+  disk: 100GB..

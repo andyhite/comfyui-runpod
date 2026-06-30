@@ -1,0 +1,3 @@
+# Drop your ComfyUI workflow .json files in this directory.
+# They sync to the pod via `files:` and land in
+# /workspace/runpod-slim/ComfyUI/user/default/workflows on boot.
