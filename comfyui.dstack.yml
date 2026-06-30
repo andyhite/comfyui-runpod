@@ -17,7 +17,6 @@ max_price: 1.20
 # nodes (snapshot.json), workflows, or config needs NO image rebuild.
 files:
   - ./pod/snapshot.json:/opt/uploads/snapshot.json
-  - ./pod/workflows:/opt/uploads/workflows
   - ./pod/user:/opt/uploads/user
 
 # Web UIs forwarded to localhost:

@@ -49,14 +49,10 @@ if [ -f "$SNAP" ]; then
   fi
 fi
 
-# 3) Lay in workflows + user config uploaded via `files:`.
-if [ -d "$UPLOADS/workflows" ]; then
-  log "syncing workflows..."
-  mkdir -p "$COMFY_DIR/user/default/workflows"
-  cp -r "$UPLOADS/workflows/." "$COMFY_DIR/user/default/workflows/" 2>/dev/null || true
-fi
+# 3) Lay in the user dir uploaded via `files:` — workflows under
+#    user/default/workflows, ComfyUI-Manager config under user/__manager, etc.
 if [ -d "$UPLOADS/user" ]; then
-  log "syncing user config..."
+  log "syncing user dir (workflows + __manager config)..."
   cp -r "$UPLOADS/user/." "$COMFY_DIR/user/" 2>/dev/null || true
 fi
 

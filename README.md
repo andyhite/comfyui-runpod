@@ -13,8 +13,9 @@ declaratively.
 - **`pod/` payload**, synced to the pod on every `make up` via dstack `files:`:
   - `pod/snapshot.json` — a **ComfyUI-Manager snapshot**: your custom nodes, pinned
     to commits, with their pip deps. Restored at boot (`cm-cli restore-snapshot`).
-  - `pod/workflows/` — your workflow `.json` files.
-  - `pod/user/` — optional baseline ComfyUI config (e.g. `comfy.settings.json`).
+  - `pod/user/` — synced wholesale into ComfyUI's `user/` dir:
+    `default/workflows/` (your workflow `.json` files) and
+    `__manager/config.ini` (ComfyUI-Manager config).
 - **`entrypoint.sh`** at boot: populate ComfyUI → restore the snapshot (idempotent,
   skipped if unchanged) → drop in workflows/config → hand off to the image's
   `/start.sh` (venv, ComfyUI, SSH, JupyterLab, FileBrowser).
