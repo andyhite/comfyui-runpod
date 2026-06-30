@@ -14,11 +14,13 @@
 # The bake also writes the snapshot's checksum as the entrypoint's idempotency
 # marker, so an unchanged snapshot skips restore-snapshot entirely at boot.
 #
-# Base is the CUDA 12.8 variant, NOT 13.0: most cheap RunPod hosts ship 12.8
-# drivers (CUDA 13 needs driver >= 580), so a cuda13.0 image crashes with
-# "NVIDIA driver too old (found 12080)". 12.8 matches the fleet; CUDA 13 buys
-# nothing for WAN/Flux. RunPod runs x86_64 — always build for linux/amd64.
-FROM runpod/comfyui:cuda12.8
+# CUDA 13.0 base. Some nodes (e.g. comfyui-rmbg BodySegment) ship deps built
+# against the CUDA 13 runtime (libcudart.so.13), which only exists here. The
+# catch is the host DRIVER must be >= R580; dstack can't filter by driver, so we
+# (a) whitelist CUDA-13 GPU architectures and (b) the entrypoint runs a CUDA
+# preflight that exits non-zero on an old-driver host so dstack retries another.
+# RunPod runs x86_64 — always build for linux/amd64.
+FROM runpod/comfyui:cuda13.0
 
 COPY entrypoint.sh /usr/local/bin/dstack-entry.sh
 RUN chmod +x /usr/local/bin/dstack-entry.sh
@@ -33,7 +35,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends rclone \
 COPY pod/snapshot.json /opt/baked-snapshot.json
 RUN if python3.12 -c "import json,sys; d=json.load(open('/opt/baked-snapshot.json')); sys.exit(0 if (d.get('git_custom_nodes') or d.get('cnr_custom_nodes') or d.get('file_custom_nodes')) else 1)"; then \
       echo "Baking snapshot..."; \
-      COMFYUI_PATH=/opt/comfyui-baked python3.12 \
+      COMFYUI_PATH=/opt/comfyui-baked \
+      PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu130 \
+      python3.12 \
         /opt/comfyui-baked/custom_nodes/ComfyUI-Manager/cm-cli.py \
         restore-snapshot /opt/baked-snapshot.json; \
     else echo "Snapshot empty — skipping bake (installs at boot instead)."; fi \

@@ -23,6 +23,16 @@ export COMFYUI_PATH="$COMFY_DIR"
 
 log() { echo "[dstack-entry] $*"; }
 
+# Preflight: this is a CUDA 13 image. If we landed on a host whose driver is too
+# old to run it, bail immediately (exit non-zero) so dstack retries on another
+# host — it can't filter hosts by driver version, only GPU type. Doing this first
+# avoids wasting time populating ComfyUI and downloading ~100GB on a dead pod.
+if ! python3.12 -c "import torch,sys; sys.exit(0 if torch.cuda.is_available() else 1)" 2>/dev/null; then
+  log "CUDA unavailable — host driver likely too old for the cuda13 image. Exiting 1 so dstack retries another host."
+  exit 1
+fi
+log "CUDA preflight OK."
+
 R2=0
 if [ -n "${RCLONE_CONFIG_R2_ACCESS_KEY_ID:-}" ] && [ -n "${R2_BUCKET:-}" ] && [ -n "${R2_ACCOUNT_ID:-}" ]; then
   export RCLONE_CONFIG_R2_ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"

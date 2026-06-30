@@ -16,7 +16,11 @@ nodes: 0..1
 idle_duration: 1h
 
 resources:
-  gpu: 24GB..48GB
+  # Match the task: CUDA-13-capable architectures only (the cuda13 image needs
+  # them), 24GB+ for WAN 14B.
+  gpu:
+    name: [A40, A100, A5000, L4, L40, L40S, RTX3090, RTX4090, RTX5090, RTXPRO4000, RTXPRO4500, RTXPRO6000]
+    memory: 24GB..
   # ~100GB of fp16 models download to ephemeral disk each boot (no volume),
   # plus image + ComfyUI + outputs — must match the task's disk requirement.
   disk: 200GB..

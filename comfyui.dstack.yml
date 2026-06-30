@@ -12,6 +12,13 @@ backends: [runpod]
 spot_policy: on-demand
 max_price: 1.20
 
+# Retry on a different host if provisioning fails OR the entrypoint's CUDA
+# preflight exits non-zero (old-driver host). dstack can't filter by driver, so
+# this is what makes landing on a CUDA-13-capable host reliable.
+retry:
+  on_events: [no-capacity, error, interruption]
+  duration: 1h
+
 # Sync the small declarative bits to the pod on every `apply`. They stage at
 # /opt/uploads; the image entrypoint lays them into ComfyUI at boot. Updating
 # nodes (snapshot.json), workflows, config, or the model list needs NO rebuild.
@@ -33,9 +40,9 @@ env:
   - HF_TOKEN=${{ secrets.HF_TOKEN }}
   # Let pip find the image's CUDA-pinned torch wheel when ComfyUI-Manager (or the
   # boot-time snapshot restore) installs a node that requires torch — otherwise
-  # pip only sees PyPI, can't satisfy the cu128 constraint, and fails with
-  # "ResolutionImpossible". Must match the image's CUDA build (cuda12.8 -> cu128).
-  - PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu128
+  # pip only sees PyPI, can't satisfy the constraint, and fails with
+  # "ResolutionImpossible". Must match the image's CUDA build (cuda13.0 -> cu130).
+  - PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu130
   - R2_BUCKET=comfyui
   - R2_ACCOUNT_ID=${{ secrets.R2_ACCOUNT_ID }}
   - RCLONE_CONFIG_R2_TYPE=s3
@@ -55,10 +62,13 @@ ports:
   - 8080
 
 resources:
-  # WAN 2.2 14B i2v is the binding constraint; Flux.2 Klein 9B fits easily.
-  # 24-48GB cards: A40 48GB (~$0.44), A5000 24GB (~$0.27), etc.
-  # dstack picks the cheapest match under max_price.
-  gpu: 24GB..48GB
+  # Whitelist CUDA-13-capable architectures (Ampere / Ada / Blackwell) so the
+  # cuda13 image runs. dstack can't filter by driver version — the entrypoint's
+  # CUDA preflight + the retry policy below handle the rare old-driver host.
+  # max_price filters the pricier ones (A100, RTXPRO6000); 24GB+ for WAN 14B.
+  gpu:
+    name: [A40, A100, A5000, L4, L40, L40S, RTX3090, RTX4090, RTX5090, RTXPRO4000, RTXPRO4500, RTXPRO6000]
+    memory: 24GB..
   # ~100GB of fp16 models (WAN 14B hi/lo + Klein 9B + encoders) live on
   # ephemeral disk with no volume, so leave headroom for ComfyUI + outputs.
   disk: 200GB..
