@@ -23,6 +23,10 @@ FROM runpod/comfyui:cuda12.8
 COPY entrypoint.sh /usr/local/bin/dstack-entry.sh
 RUN chmod +x /usr/local/bin/dstack-entry.sh
 
+# rclone — the entrypoint uses it for the R2 model cache + output persistence
+RUN apt-get update && apt-get install -y --no-install-recommends rclone \
+ && rm -rf /var/lib/apt/lists/*
+
 # --- Bake the snapshot (comment this block out to install purely at boot) -----
 # Harmless while pod/snapshot.json is empty (no-op); fill the snapshot, then
 # `make image-build` to actually bake your nodes in.

@@ -49,9 +49,20 @@ Generate `pod/snapshot.json` from a working setup: `make snapshot-help`.
   an Apple-silicon Mac uses amd64 emulation, so the bake step is slower there.)
 - **Models** — declared in `pod/models.txt` (`<models/ subdir>  <URL>`), synced via
   `files:`, downloaded at boot in the background (idempotent). Gated repos (Flux.2
-  Klein 9B) need an HF token: `dstack secret set HF_TOKEN <token>` and accept the
-  license at huggingface.co/black-forest-labs/FLUX.2-klein-9B. ~100 GB re-downloads
-  on every cold boot (no volume) — the main argument for Phase 2 (R2 cache).
+  Klein 9B) need an HF token + license acceptance at
+  huggingface.co/black-forest-labs/FLUX.2-klein-9B.
+- **Persistence (R2)** — an R2 bucket (`comfyui`) is the persistence layer:
+  - **Models cache** (`r2://comfyui/models`): each boot pulls from R2; on a miss it
+    downloads from origin and caches back up. First boot seeds R2 (slow); later
+    boots are fast (free egress, gated model no longer needs the token).
+  - **Outputs** (`r2://comfyui/outputs`): synced every 30s so they survive teardown.
+  - rclone (in the image) is configured via `RCLONE_CONFIG_R2_*` env from dstack
+    secrets. No R2 secrets → models from origin only, outputs not persisted.
+
+  Setup: `make r2-bucket` (done), then `make secrets-help` for the secrets to set
+  (`HF_TOKEN`, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`) — account-
+  specific values stay out of this public repo. Create the R2 API token in the
+  Cloudflare dashboard (R2 → Manage R2 API Tokens → Object Read & Write).
 - **Outputs / persistence** — *not handled yet.* No network volume, so outputs are
   on ephemeral disk. Download via the UI before `make down`, or wire object-storage
   sync (R2/S3).

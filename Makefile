@@ -31,7 +31,10 @@ CM_CLI       := $(COMFY_DIR)/custom_nodes/ComfyUI-Manager/cm-cli.py
 
 .DEFAULT_GOAL := help
 
-.PHONY: help image-build server fleet up down logs attach ps status snapshot-help
+R2_BUCKET    ?= comfyui
+
+.PHONY: help image-build server fleet up down logs attach ps status snapshot-help \
+        r2-bucket secrets-help
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -63,6 +66,19 @@ ps: ## List runs
 
 status: ## Show detailed status for this run
 	dstack ps -v -n 1
+
+r2-bucket: ## Create the R2 bucket for the model cache + outputs (one-time)
+	npx -y wrangler@latest r2 bucket create $(R2_BUCKET)
+
+secrets-help: ## Show the dstack secrets to set (HF + R2)
+	@echo "dstack secret set HF_TOKEN <hugging-face token>   # accept Klein-9B license too"
+	@echo "dstack secret set R2_ACCOUNT_ID <cloudflare account id>"
+	@echo "dstack secret set R2_ACCESS_KEY_ID <r2 access key id>"
+	@echo "dstack secret set R2_SECRET_ACCESS_KEY <r2 secret access key>"
+	@echo
+	@echo "Account id: npx wrangler whoami   |   Create the R2 API token at:"
+	@echo "  Cloudflare dashboard -> R2 -> Manage R2 API Tokens -> Create API token"
+	@echo "  -> Object Read & Write (scope to the '$(R2_BUCKET)' bucket)."
 
 snapshot-help: ## How to generate pod/snapshot.json from a running pod
 	@echo "1. make up, then SSH/Jupyter into the pod (or use the ComfyUI-Manager UI)."

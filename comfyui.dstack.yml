@@ -20,11 +20,25 @@ files:
   - ./pod/user:/opt/uploads/user
   - ./pod/models.txt:/opt/uploads/models.txt
 
-# HF token for gated downloads (Flux.2 Klein 9B). Set it once:
-#   dstack secret set HF_TOKEN <your_hf_token>
-# and accept the license at huggingface.co/black-forest-labs/FLUX.2-klein-9B.
+# Secrets (set once with `dstack secret set <NAME> <value>`) — keeps account-
+# specific values out of this public repo. The entrypoint builds the R2 endpoint
+# from R2_ACCOUNT_ID.
+#   HF_TOKEN              gated downloads (Flux.2 Klein 9B) + accept its license
+#   R2_ACCOUNT_ID         your Cloudflare account id (for the R2 endpoint)
+#   R2_ACCESS_KEY_ID      from a Cloudflare R2 API token (Object Read & Write)
+#   R2_SECRET_ACCESS_KEY  ditto
+# R2 turns on the model cache + output persistence; omit the R2_* secrets and
+# the pod still runs (models from origin, outputs not persisted).
 env:
   - HF_TOKEN=${{ secrets.HF_TOKEN }}
+  - R2_BUCKET=comfyui
+  - R2_ACCOUNT_ID=${{ secrets.R2_ACCOUNT_ID }}
+  - RCLONE_CONFIG_R2_TYPE=s3
+  - RCLONE_CONFIG_R2_PROVIDER=Cloudflare
+  - RCLONE_CONFIG_R2_ACL=private
+  - RCLONE_CONFIG_R2_NO_CHECK_BUCKET=true
+  - RCLONE_CONFIG_R2_ACCESS_KEY_ID=${{ secrets.R2_ACCESS_KEY_ID }}
+  - RCLONE_CONFIG_R2_SECRET_ACCESS_KEY=${{ secrets.R2_SECRET_ACCESS_KEY }}
 
 # Web UIs forwarded to localhost:
 #   ComfyUI     -> http://localhost:8188
@@ -56,5 +70,5 @@ utilization_policy:
 # No `commands`: the custom image's entrypoint handles populate + snapshot
 # restore + workflow/config injection, then execs the base image's /start.sh.
 
-# NOTE: persistence is not wired yet. Without a volume, outputs live on ephemeral
-# disk — sync them out (object storage) or download via the UI before `make down`.
+# Persistence is via R2 (see env above): models are cached in r2://comfyui/models
+# and outputs are synced to r2://comfyui/outputs every 30s by the entrypoint.
