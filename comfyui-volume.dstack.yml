@@ -1,0 +1,12 @@
+type: volume
+name: comfyui_eu_nl_1
+
+# Network volumes are bound to one backend + region (datacenter).
+# A pod can only mount this volume if it runs in the SAME datacenter.
+backend: runpod
+region: EU-NL-1
+
+# Registers an EXISTING RunPod network volume (does not create one).
+# Replace with the real volume ID from the RunPod console (Storage tab)
+# or `runpodctl get volume`. RunPod references volumes by ID, not name.
+volume_id: REPLACE_WITH_RUNPOD_VOLUME_ID

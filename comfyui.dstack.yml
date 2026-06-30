@@ -1,0 +1,37 @@
+type: task
+name: comfyui
+
+# RunPod's official ComfyUI image on CUDA 13.0
+image: runpod/comfyui:cuda13.0
+
+# Pin to RunPod in EU-NL-1 so the network volume can attach
+backends: [runpod]
+regions: [EU-NL-1]
+
+# On-demand only (won't be reclaimed mid-generation), capped at $1.20/hr
+# so dstack stays in the cheap 24GB tier and never grabs a pricey card.
+spot_policy: on-demand
+max_price: 1.20
+
+# Mount the registered network volume. RunPod network volumes mount at
+# /workspace; the ComfyUI image keeps models/outputs there so they persist.
+volumes:
+  - name: comfyui_eu_nl_1
+    path: /workspace
+
+# Forward ComfyUI's web UI to your machine: http://localhost:8188
+ports:
+  - 8188
+
+resources:
+  # Cheapest GPU tier that handles WAN 2.2 14B i2v (the binding constraint;
+  # Flux.2 Klein 9B fits easily). 24GB = RTX 4090/3090/A5000 sweet spot.
+  # Bump the floor to 48GB.. if you OOM at higher res / longer clips.
+  gpu: 24GB..48GB
+  disk: 100GB..
+
+# Launch ComfyUI bound to all interfaces so the forwarded port works.
+# Adjust the path if the image's ComfyUI lives somewhere other than /comfyui.
+commands:
+  - cd /comfyui
+  - python main.py --listen 0.0.0.0 --port 8188
