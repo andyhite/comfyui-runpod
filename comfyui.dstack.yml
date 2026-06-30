@@ -7,7 +7,7 @@ name: comfyui
 image: ghcr.io/andyhite/comfyui-runpod:latest
 
 # Region-agnostic: no network volume, so dstack picks the cheapest 24-48GB
-# CUDA-13 GPU anywhere on RunPod, on-demand, under $1.20/hr.
+# GPU anywhere on RunPod, on-demand, under $1.20/hr.
 backends: [runpod]
 spot_policy: on-demand
 max_price: 1.20
@@ -31,10 +31,19 @@ ports:
 
 resources:
   # WAN 2.2 14B i2v is the binding constraint; Flux.2 Klein 9B fits easily.
-  # 24-48GB CUDA-13 cards: A40 48GB (~$0.44), A5000 24GB (~$0.27), etc.
+  # 24-48GB cards: A40 48GB (~$0.44), A5000 24GB (~$0.27), etc.
   # dstack picks the cheapest match under max_price.
   gpu: 24GB..48GB
   disk: 100GB..
+
+# Auto-stop the pod if the GPU sits below 10% for a full hour — i.e. you
+# finished generating and walked away. The base image won't stop itself
+# (ComfyUI is a server, and it stays alive even after a crash), so this is the
+# safety net against a forgotten pod billing all weekend. Enforced by the
+# in-container runner, so it works on RunPod (unlike fleet idle_duration).
+utilization_policy:
+  min_gpu_utilization: 10
+  time_window: 1h
 
 # No `commands`: the custom image's entrypoint handles populate + snapshot
 # restore + workflow/config injection, then execs the base image's /start.sh.
