@@ -16,12 +16,17 @@ max_price: 1.20
 # Mount the registered network volume. RunPod network volumes mount at
 # /workspace; the ComfyUI image keeps models/outputs there so they persist.
 volumes:
-  - name: comfyui_eu_nl_1
+  - name: comfyui-eu-nl-1
     path: /workspace
 
-# Forward ComfyUI's web UI to your machine: http://localhost:8188
+# Forward the image's web UIs to your machine:
+#   ComfyUI     -> http://localhost:8188
+#   JupyterLab  -> http://localhost:8888  (tokenless: JUPYTER_PASSWORD unset)
+#   FileBrowser -> http://localhost:8080  (default login admin / adminadmin12)
 ports:
   - 8188
+  - 8888
+  - 8080
 
 resources:
   # Cheapest GPU tier that handles WAN 2.2 14B i2v (the binding constraint;
@@ -30,8 +35,7 @@ resources:
   gpu: 24GB..48GB
   disk: 100GB..
 
-# Launch ComfyUI bound to all interfaces so the forwarded port works.
-# Adjust the path if the image's ComfyUI lives somewhere other than /comfyui.
-commands:
-  - cd /comfyui
-  - python main.py --listen 0.0.0.0 --port 8188
+# No `commands`: dstack runs the image's own entrypoint. That start script
+# populates /workspace/runpod-slim/ComfyUI into the (initially empty) network
+# volume on first boot and launches ComfyUI on 8188 — overriding it here would
+# skip that sync and break first boot.
