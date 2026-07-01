@@ -23,6 +23,77 @@ export COMFYUI_PATH="$COMFY_DIR"
 
 log() { echo "[dstack-entry] $*"; }
 
+log_snap() { echo "[snapshot] $*"; }
+
+CM_CLI="$COMFY_DIR/custom_nodes/ComfyUI-Manager/cm-cli.py"
+MARKER="$COMFY_DIR/.dstack-applied-snapshot.sha"
+
+# Generate a Manager snapshot of the current custom_nodes state to a temp file.
+# Returns 0 and prints the temp path on success; non-zero on failure.
+_snapshot_generate() {
+  local tmp="/tmp/snapshot.gen.json"
+  if python3.12 "$CM_CLI" save-snapshot --output "$tmp" >/dev/null 2>&1; then
+    printf '%s' "$tmp"; return 0
+  fi
+  return 1
+}
+
+# Record the current state as the baseline WITHOUT uploading. Treats whatever is
+# on disk now (e.g. just restored from R2) as truth, so a degraded boot state
+# never clobbers the good R2 snapshot.
+snapshot_seed() {
+  local tmp
+  if tmp="$(_snapshot_generate)"; then
+    BASELINE_SHA="$(sha256sum "$tmp" | cut -d' ' -f1)"
+    log_snap "baseline seeded (no upload) — watching custom_nodes for changes"
+  else
+    BASELINE_SHA=""
+    log_snap "baseline seed failed — first change will upload"
+  fi
+}
+
+# Regenerate the snapshot; if it changed vs BASELINE_SHA, upload to R2 and
+# advance the baseline + boot marker. Never fatal.
+snapshot_reconcile() {
+  local reason="${1:-change}" tmp sha
+  if ! tmp="$(_snapshot_generate)"; then
+    log_snap "save-snapshot failed ($reason) — will retry on next event"
+    return 0
+  fi
+  sha="$(sha256sum "$tmp" | cut -d' ' -f1)"
+  if [ "$sha" = "${BASELINE_SHA:-}" ]; then
+    log_snap "no change ($reason)"
+    return 0
+  fi
+  if rclone copyto "$tmp" "r2:$R2_BUCKET/snapshot.json" 2>/dev/null; then
+    BASELINE_SHA="$sha"
+    echo "$sha" > "$MARKER"
+    log_snap "uploaded new snapshot to r2:$R2_BUCKET/snapshot.json ($reason)"
+  else
+    log_snap "upload failed ($reason) — will retry on next event"
+  fi
+}
+
+# Seed the baseline, then watch custom_nodes and reconcile on each debounced
+# burst of file events. Runs until the pod stops.
+snapshot_watch() {
+  snapshot_seed
+  inotifywait -m -r -q \
+    -e create -e delete -e modify -e moved_to -e moved_from \
+    --exclude '(/\.git/|__pycache__|\.part)' \
+    "$COMFY_DIR/custom_nodes" |
+  while read -r _; do
+    # Debounce: drain further events until SNAPSHOT_DEBOUNCE seconds of quiet.
+    while read -r -t "${SNAPSHOT_DEBOUNCE:-30}" _; do :; done
+    snapshot_reconcile "custom_nodes change"
+  done
+}
+
+# When sourced by the test harness, stop here: define lib, skip the boot flow.
+if [ -n "${ENTRYPOINT_LIB_ONLY:-}" ]; then
+  return 0
+fi
+
 # Preflight: this is a CUDA 13 image. If we landed on a host whose driver is too
 # old to run it, bail immediately (exit non-zero) so dstack retries on another
 # host — it can't filter hosts by driver version, only GPU type. Doing this first
