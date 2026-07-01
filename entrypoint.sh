@@ -23,73 +23,98 @@ export COMFYUI_PATH="$COMFY_DIR"
 
 log() { echo "[dstack-entry] $*"; }
 
-log_snap() { echo "[snapshot] $*"; }
+# ---------------------------------------------------------------------------
+# R2 mirror library. R2 is an exact copy of four dirs: custom_nodes, user,
+# models, output. Restore (R2->pod) uses `copy` (non-destructive); the running
+# mirror (pod->R2) uses `sync` (destructive — deletions/renames propagate).
+# A dir's up-sync watcher starts ONLY after its restore succeeds, so a degraded
+# pod can never wipe good data in R2.
+# ---------------------------------------------------------------------------
 
-CM_CLI="$COMFY_DIR/custom_nodes/ComfyUI-Manager/cm-cli.py"
-MARKER="$COMFY_DIR/.dstack-applied-snapshot.sha"
+# Exclude sets. Kept in sync across two syntaxes: rclone globs and one POSIX
+# extended-regex for inotifywait. NOTE: `.git` is intentionally NOT excluded.
+GLOBAL_RCLONE_EXCLUDES=(
+  --exclude '.venv/**' --exclude 'venv/**'
+  --exclude '__pycache__/**' --exclude '*.pyc'
+  --exclude '*.part*' --exclude '*.tmp'
+  --exclude '*.log' --exclude 'comfyui.db*'
+)
+USER_RCLONE_EXCLUDES=("${GLOBAL_RCLONE_EXCLUDES[@]}" --exclude '__manager/cache/**')
+GLOBAL_INOTIFY_EXCLUDE='(/\.venv/|/venv/|/__pycache__/|\.pyc$|\.part|\.tmp$|\.log$|comfyui\.db)'
+USER_INOTIFY_EXCLUDE='(/\.venv/|/venv/|/__pycache__/|\.pyc$|\.part|\.tmp$|\.log$|comfyui\.db|/__manager/cache/)'
 
-# Generate a Manager snapshot of the current custom_nodes state to a temp file.
-# Returns 0 and prints the temp path on success; non-zero on failure.
-_snapshot_generate() {
-  local tmp="/tmp/snapshot.gen.json"
-  if python3.12 "$CM_CLI" save-snapshot --output "$tmp" >/dev/null 2>&1; then
-    printf '%s' "$tmp"; return 0
+# Restore a directory from R2. An empty/absent R2 path is a valid FRESH state
+# (return 0 so the watcher starts and seeds it). An lsf failure means R2 is
+# unreachable/misconfigured (return 1 — do NOT let a watcher start). A partial
+# copy failure also returns non-zero. Distinguishing these is the safety hinge.
+restore_dir() {
+  local local_dir="$1" subpath="$2"; shift 2
+  mkdir -p "$local_dir"
+  if ! rclone lsf "r2:$R2_BUCKET/$subpath" >/dev/null 2>&1; then
+    log "cannot list r2:$R2_BUCKET/$subpath (R2 unreachable?) — NOT starting its watcher"
+    return 1
+  fi
+  if [ -z "$(rclone lsf "r2:$R2_BUCKET/$subpath" 2>/dev/null | head -1)" ]; then
+    log "r2:$R2_BUCKET/$subpath is empty — fresh; watcher will seed it"
+    return 0
+  fi
+  log "restoring $subpath from R2..."
+  rclone copy "r2:$R2_BUCKET/$subpath" "$local_dir" "$@"
+}
+
+# Mirror a directory up to R2 (destructive exact copy).
+sync_up() {
+  local local_dir="$1" subpath="$2"; shift 2
+  rclone sync "$local_dir" "r2:$R2_BUCKET/$subpath" "$@"
+}
+
+# Watch a directory and sync_up on each debounced burst. Runs until the pod stops.
+watch_sync() {
+  local local_dir="$1" subpath="$2" regex="$3"; shift 3
+  inotifywait -m -r -q \
+    -e create -e delete -e modify -e moved_to -e moved_from \
+    --exclude "$regex" \
+    "$local_dir" |
+  while read -r _; do
+    # Debounce: drain further events until DEBOUNCE seconds of quiet.
+    while read -r -t "${DEBOUNCE:-15}" _; do :; done
+    sync_up "$local_dir" "$subpath" "$@"
+  done
+}
+
+# Background a watcher. Split out so tests can override it.
+start_watcher() {
+  watch_sync "$@" &
+}
+
+# Restore a dir, and ONLY on success start its watcher. The gate that upholds
+# the safety invariant.
+restore_and_watch() {
+  local local_dir="$1" subpath="$2" regex="$3"; shift 3
+  if restore_dir "$local_dir" "$subpath" "$@"; then
+    start_watcher "$local_dir" "$subpath" "$regex" "$@"
+    return 0
   fi
   return 1
 }
 
-# Record the current state as the baseline WITHOUT uploading. Treats whatever is
-# on disk now (e.g. just restored from R2) as truth, so a degraded boot state
-# never clobbers the good R2 snapshot.
-snapshot_seed() {
-  local tmp
-  if tmp="$(_snapshot_generate)"; then
-    BASELINE_SHA="$(sha256sum "$tmp" | cut -d' ' -f1)"
-    log_snap "baseline seeded (no upload) — watching custom_nodes for changes"
-  else
-    BASELINE_SHA=""
-    log_snap "baseline seed failed — first change will upload"
+# Install restored custom nodes' Python deps into the fresh venv. restore-
+# dependencies handles each node's requirements.txt; the sweep runs any
+# install.py the node ships (first-install side effects pip won't do).
+install_node_deps() {
+  local cm_cli="$COMFY_DIR/custom_nodes/ComfyUI-Manager/cm-cli.py" np
+  if [ -f "$cm_cli" ]; then
+    log "installing node dependencies (cm-cli restore-dependencies)..."
+    python3.12 "$cm_cli" restore-dependencies \
+      || log "WARNING: some node deps failed to install — check the logs."
   fi
-  return 0
-}
-
-# Regenerate the snapshot; if it changed vs BASELINE_SHA, upload to R2 and
-# advance the baseline + boot marker. Never fatal.
-snapshot_reconcile() {
-  local reason="${1:-change}" tmp sha
-  if ! tmp="$(_snapshot_generate)"; then
-    log_snap "save-snapshot failed ($reason) — will retry on next event"
-    return 0
-  fi
-  sha="$(sha256sum "$tmp" | cut -d' ' -f1)"
-  if [ "$sha" = "${BASELINE_SHA:-}" ]; then
-    log_snap "no change ($reason)"
-    return 0
-  fi
-  if rclone copyto "$tmp" "r2:$R2_BUCKET/snapshot.json" 2>/dev/null; then
-    BASELINE_SHA="$sha"
-    echo "$sha" > "$MARKER"
-    log_snap "uploaded new snapshot to r2:$R2_BUCKET/snapshot.json ($reason)"
-  else
-    log_snap "upload failed ($reason) — will retry on next event"
-  fi
-  return 0
-}
-
-# Seed the baseline, then watch custom_nodes and reconcile on each debounced
-# burst of file events. Runs until the pod stops.
-snapshot_watch() {
-  snapshot_seed
-  inotifywait -m -r -q \
-    -e create -e delete -e modify -e moved_to -e moved_from \
-    --exclude '(/\.git/|__pycache__|\.part)' \
-    "$COMFY_DIR/custom_nodes" |
-  while read -r _; do
-    # Debounce: drain further events until SNAPSHOT_DEBOUNCE seconds of quiet.
-    while read -r -t "${SNAPSHOT_DEBOUNCE:-30}" _; do :; done
-    snapshot_reconcile "custom_nodes change"
+  for np in "$COMFY_DIR"/custom_nodes/*/; do
+    if [ -f "${np}install.py" ]; then
+      log "running install.py for $(basename "$np")..."
+      ( cd "$np" && python3.12 install.py ) \
+        || log "WARNING: install.py failed for $(basename "$np")"
+    fi
   done
-  return 0
 }
 
 # When sourced by the test harness, stop here: define lib, skip the boot flow.
