@@ -19,29 +19,27 @@ retry:
   on_events: [no-capacity, error, interruption]
   duration: 1h
 
-# Sync the small declarative bits to the pod on every `apply`. They stage at
-# /opt/uploads; the image entrypoint lays them into ComfyUI at boot. Updating
-# the model list (models.txt) needs NO rebuild. The snapshot is NOT shipped
-# here — it lives in R2 (restored at boot, auto-updated on custom_nodes change),
-# as does the user dir (workflows + config).
-files:
-  - ./pod/models.txt:/opt/uploads/models.txt
+# Nothing is uploaded to the pod anymore: models, custom nodes, the user dir,
+# and outputs all live in R2 and are restored at boot by the image entrypoint.
+# (Set the R2 secrets below to enable that.)
 
 # Secrets (set once with `dstack secret set <NAME> <value>`) — keeps account-
 # specific values out of this public repo. The entrypoint builds the R2 endpoint
 # from R2_ACCOUNT_ID.
-#   HF_TOKEN              gated downloads (Flux.2 Klein 9B) + accept its license
+#   HF_TOKEN   kept for nodes that call HF at runtime; no longer used for model
+#              seeding (R2 is the sole model source)
 #   R2_ACCOUNT_ID         your Cloudflare account id (for the R2 endpoint)
 #   R2_ACCESS_KEY_ID      from a Cloudflare R2 API token (Object Read & Write)
 #   R2_SECRET_ACCESS_KEY  ditto
-# R2 turns on the model cache + output persistence; omit the R2_* secrets and
-# the pod still runs (models from origin, outputs not persisted).
+# The R2 secrets enable persistence for ALL four mirrored dirs (custom_nodes,
+# user, models, output). Omit them and the pod still runs, but with NO
+# persistence — nothing is restored at boot and nothing is mirrored back.
 env:
   - HF_TOKEN=${{ secrets.HF_TOKEN }}
   # Let pip find the image's CUDA-pinned torch wheel when ComfyUI-Manager (or the
-  # boot-time snapshot restore) installs a node that requires torch — otherwise
-  # pip only sees PyPI, can't satisfy the constraint, and fails with
-  # "ResolutionImpossible". Must match the image's CUDA build (cuda13.0 -> cu130).
+  # boot-time R2 restore's dependency install) installs a node that requires
+  # torch — otherwise pip only sees PyPI, can't satisfy the constraint, and fails
+  # with "ResolutionImpossible". Must match the image's CUDA build (cuda13.0 -> cu130).
   - PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu130
   - R2_BUCKET=comfyui
   - R2_ACCOUNT_ID=${{ secrets.R2_ACCOUNT_ID }}
@@ -85,8 +83,10 @@ utilization_policy:
   min_gpu_utilization: 10
   time_window: 1h
 
-# No `commands`: the custom image's entrypoint handles populate + snapshot
-# restore + user-dir restore from R2, then execs the base image's /start.sh.
-
-# Persistence is via R2 (see env above): models are cached in r2://comfyui/models
-# and outputs are synced to r2://comfyui/outputs every 30s by the entrypoint.
+# No `commands`: the custom image's entrypoint restores custom_nodes + user from
+# R2 (blocking), installs node deps, streams models + output from R2 in the
+# background, starts a watcher per dir that mirrors it back to R2, then execs the
+# base image's /start.sh.
+#
+# Persistence is via R2 (see env above): R2 is an exact mirror of
+# custom_nodes/, user/, models/, and output/.

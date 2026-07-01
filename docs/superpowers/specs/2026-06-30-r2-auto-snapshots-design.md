@@ -1,3 +1,7 @@
+> **SUPERSEDED (2026-07-01)** by the R2 directory-mirror design
+> (`docs/superpowers/specs/2026-07-01-r2-mirror-design.md`). The snapshot-based
+> approach described below is no longer implemented.
+
 # R2-backed auto-snapshots — design
 
 **Date:** 2026-06-30

@@ -4,13 +4,13 @@
 #   make image-build     # build & push the custom image (once; and when entrypoint.sh changes)
 #   make server          # terminal 1 — leave running
 #   make fleet           # register the instance pool (once)
-#   make up              # provision the pod (uploads model list) + attach
+#   make up              # provision the pod + attach
 #   open http://localhost:8188   (ComfyUI; also 8888 Jupyter, 8080 FileBrowser)
 #   make down            # tear the pod down when finished
 #
-# Day-to-day: edit pod/models.txt, then `make up`. No image rebuild needed for
-# that — only when entrypoint.sh changes. Custom nodes are snapshotted to R2
-# automatically on change; workflows + config persist to R2 too (no repo edit).
+# Day-to-day: install models/nodes on the running pod (ComfyUI-Manager). They
+# mirror to R2 automatically; workflows + config + outputs persist to R2 too. An
+# image rebuild is only needed when entrypoint.sh changes.
 
 # Custom image (must match `image:` in comfyui.dstack.yml). RunPod is x86_64.
 IMAGE        ?= ghcr.io/andyhite/comfyui-runpod
@@ -19,8 +19,7 @@ PLATFORM     ?= linux/amd64
 
 # dstack control-plane server (port default avoids the common 3000 clash).
 DSTACK_PORT  ?= 3333
-# Raise the `files:` upload cap (for model manifests and configs).
-UPLOAD_LIMIT ?= 104857600  # 100 MB
+UPLOAD_LIMIT ?= 104857600  # 100 MB (dstack code-upload cap; no payload is uploaded now)
 
 # Run/fleet/config names and files.
 RUN          ?= comfyui
@@ -47,7 +46,7 @@ server: ## Start the dstack server (foreground; leave running). Override: make s
 fleet: ## Register/refresh the instance pool (one-time; re-run after editing the fleet)
 	dstack apply -y -f $(FLEET_FILE)
 
-up: ## Provision the pod + attach (uploads model list via files:)
+up: ## Provision the pod + attach
 	dstack apply -y -f $(TASK_FILE)
 
 down: ## Stop and tear down the pod
@@ -65,7 +64,7 @@ ps: ## List runs
 status: ## Show detailed status for this run
 	dstack ps -v -n 1
 
-r2-bucket: ## Create the R2 bucket for the model cache + outputs (one-time)
+r2-bucket: ## Create the R2 bucket for the directory mirror (one-time)
 	npx -y wrangler@latest r2 bucket create $(R2_BUCKET)
 
 secrets-help: ## Show the dstack secrets to set (HF + R2)

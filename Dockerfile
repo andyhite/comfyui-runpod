@@ -1,15 +1,11 @@
 # Custom ComfyUI image for RunPod + dstack.
 #
 # A thin wrapper over RunPod's official image. It only adds a smart entrypoint
-# that, at boot, restores a ComfyUI-Manager snapshot and the R2-persisted user
-# dir (workflows / config), then hands off to the base image's /start.sh.
-#
-# Snapshot ownership lives in R2, not the image:
-#   - The entrypoint restores the ComfyUI-Manager snapshot from
-#     r2://$R2_BUCKET/snapshot.json at boot (delta over the base image nodes).
-#   - A background inotify watcher re-uploads a fresh snapshot to R2 whenever
-#     custom_nodes changes, so R2 stays current with no repo edit or rebuild.
-#   - This image only needs a rebuild when entrypoint.sh (or deps below) change.
+# that, at boot, restores four R2-mirrored directories (custom_nodes, user,
+# models, output), installs custom-node deps, starts a filesystem-watcher per
+# dir that mirrors it back to R2, then hands off to the base image's /start.sh.
+# R2 is the single source of truth; this image only needs a rebuild when
+# entrypoint.sh (or the deps below) change.
 #
 # CUDA 13.0 base. Some nodes (e.g. comfyui-rmbg BodySegment) ship deps built
 # against the CUDA 13 runtime (libcudart.so.13), which only exists here. The
@@ -22,8 +18,8 @@ FROM runpod/comfyui:cuda13.0
 COPY entrypoint.sh /usr/local/bin/dstack-entry.sh
 RUN chmod +x /usr/local/bin/dstack-entry.sh
 
-# rclone — R2 model cache + output/snapshot persistence.
-# inotify-tools — the entrypoint's custom_nodes snapshot watcher (inotifywait).
+# rclone — R2 restore + the per-directory mirror.
+# inotify-tools — the entrypoint's directory watchers (inotifywait).
 RUN apt-get update && apt-get install -y --no-install-recommends rclone inotify-tools \
  && rm -rf /var/lib/apt/lists/*
 
