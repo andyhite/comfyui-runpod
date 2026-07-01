@@ -27,5 +27,4 @@ RUN chmod +x /usr/local/bin/dstack-entry.sh
 RUN apt-get update && apt-get install -y --no-install-recommends rclone inotify-tools \
  && rm -rf /var/lib/apt/lists/*
 
-
 ENTRYPOINT ["/usr/local/bin/dstack-entry.sh"]
