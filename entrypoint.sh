@@ -3,17 +3,17 @@
 #
 # Runs BEFORE the base image's /start.sh so we can set the pod up on a fresh
 # (volume-less) disk before ComfyUI launches:
-#   1. populate ComfyUI from the baked copy
-#   2. restore the ComfyUI-Manager snapshot uploaded via `files:` (idempotent)
-#   3. restore the user dir (workflows + __manager config) from R2
-#   4. download models (background): R2 cache -> origin (HF) -> cache up to R2
-#   5. sync outputs + user dir -> R2 in the background (so they survive termination)
+#   1. CUDA-13 preflight (exit non-zero on an old-driver host so dstack retries)
+#   2. populate ComfyUI from the baked copy if the disk is fresh
+#   3. restore custom_nodes + user from R2 (blocking), then install node deps
+#   4. restore models + output from R2 in the background (ComfyUI comes up first)
+#   5. start a filesystem-watcher per dir that rclone-syncs it back to R2, so R2
+#      stays an EXACT mirror. Each watcher starts only after its restore succeeds.
 # then hand off to /start.sh, which creates the venv and launches ComfyUI, SSH,
 # JupyterLab, and FileBrowser.
 #
-# R2 persistence activates only when RCLONE_CONFIG_R2_* + R2_BUCKET are set
-# (dstack secrets/env); otherwise models come from origin only and outputs are
-# not persisted — the pod still works.
+# R2 persistence activates only when RCLONE_CONFIG_R2_* + R2_BUCKET + R2_ACCOUNT_ID
+# are set (dstack secrets/env); otherwise the pod runs with no persistence.
 set -uo pipefail
 
 COMFY_DIR=/workspace/runpod-slim/ComfyUI
@@ -124,6 +124,29 @@ install_node_deps() {
   done
 }
 
+# Restore + mirror all four dirs. Blocking for custom_nodes + user (small,
+# required for a correct launch); backgrounded for models + output (large —
+# ComfyUI comes up while they stream). Each watcher is gated on its restore.
+start_r2_persistence() {
+  # custom_nodes: restore -> install deps -> gated watcher.
+  if restore_dir "$COMFY_DIR/custom_nodes" custom_nodes "${GLOBAL_RCLONE_EXCLUDES[@]}"; then
+    install_node_deps
+    start_watcher "$COMFY_DIR/custom_nodes" custom_nodes "$GLOBAL_INOTIFY_EXCLUDE" "${GLOBAL_RCLONE_EXCLUDES[@]}"
+  else
+    log "custom_nodes restore failed — skipping node dep install + watcher (protecting R2)"
+  fi
+
+  # user: restore -> gated watcher.
+  restore_and_watch "$COMFY_DIR/user" user "$USER_INOTIFY_EXCLUDE" "${USER_RCLONE_EXCLUDES[@]}" \
+    || log "user restore failed — skipping its watcher (protecting R2)"
+
+  # models + output: background restore -> gated watcher (stream in).
+  restore_and_watch "$COMFY_DIR/models" models "$GLOBAL_INOTIFY_EXCLUDE" "${GLOBAL_RCLONE_EXCLUDES[@]}" \
+    || log "models restore failed — skipping its watcher (protecting R2)" &
+  restore_and_watch "$COMFY_DIR/output" output "$GLOBAL_INOTIFY_EXCLUDE" "${GLOBAL_RCLONE_EXCLUDES[@]}" \
+    || log "output restore failed — skipping its watcher (protecting R2)" &
+}
+
 # When sourced by the test harness, stop here: define lib, skip the boot flow.
 if [ -n "${ENTRYPOINT_LIB_ONLY:-}" ]; then
   return 0
@@ -158,132 +181,11 @@ if [ ! -d "$COMFY_DIR" ]; then
   cp -r "$BAKED" "$COMFY_DIR"
 fi
 
-# 2) Restore the Manager snapshot from R2 (idempotent — skip if unchanged on
-#    this disk). R2 is the source of truth; the watcher (step 6) keeps it fresh.
-#    First-ever run (or no R2) has no snapshot: come up on the base image nodes.
-SNAP=/tmp/snapshot.json
-if [ "$R2" = 1 ] && rclone copyto "r2:$R2_BUCKET/snapshot.json" "$SNAP" 2>/dev/null && [ -s "$SNAP" ]; then
-  sum="$(sha256sum "$SNAP" | cut -d' ' -f1)"
-  if [ "$(cat "$MARKER" 2>/dev/null || true)" != "$sum" ]; then
-    log "restoring ComfyUI-Manager snapshot from R2..."
-    if python3.12 "$CM_CLI" restore-snapshot "$SNAP"; then
-      # restore-snapshot re-clones the nodes but does NOT install their pip deps
-      # (e.g. Impact Pack -> scikit-image, WAS -> numba). restore-dependencies
-      # runs each installed node's requirements.txt (resolved via cu130 index).
-      log "installing node dependencies (restore-dependencies)..."
-      python3.12 "$CM_CLI" restore-dependencies \
-        || log "WARNING: some node deps failed to install — check the logs."
-      echo "$sum" > "$MARKER"; log "snapshot restored."
-    else
-      log "WARNING: snapshot restore had errors — continuing so SSH/Jupyter come up."
-    fi
-  else
-    log "snapshot unchanged — skipping restore."
-  fi
-else
-  log "no snapshot in R2 (or R2 disabled) — starting with base image nodes."
-fi
-
-# 3) User dir (workflows, __manager/config.ini, comfy settings, etc.) is your
-#    LIVE state, persisted entirely in R2 — restored here at boot and pushed back
-#    every 30s (see step 5). No repo baseline: the baked ComfyUI ships an empty
-#    user dir, so a fresh pod with no R2 just starts clean. __manager/cache is
-#    large and regenerable, so it's excluded.
+# Restore state from R2 and start the directory mirrors. Blocking restores
+# (custom_nodes + user) finish before ComfyUI launches; models + output stream
+# in the background. Skipped entirely when R2 isn't configured.
 if [ "$R2" = 1 ]; then
-  log "restoring live user dir from R2..."
-  rclone copy "r2:$R2_BUCKET/user" "$COMFY_DIR/user" \
-    --exclude "__manager/cache/**" --exclude "*.log" --exclude "comfyui.db*" \
-    2>/dev/null || true
-fi
-
-# 4) Models in the BACKGROUND: R2 cache -> origin (HF) -> cache up to R2.
-#    Idempotent: skips files already on disk. Gated repos (Flux.2 Klein 9B) need
-#    HF_TOKEN on the FIRST download; afterwards they're served from R2.
-MANIFEST="$UPLOADS/models.txt"
-if [ -f "$MANIFEST" ]; then
-  log "starting model downloads in background (watch the [models] log lines)..."
-  DONE_MARK=/tmp/.models-done; rm -f "$DONE_MARK"
-  (
-    while read -r dir url; do
-      [ -z "${dir:-}" ] && continue
-      case "$dir" in \#*) continue ;; esac
-      [ -z "${url:-}" ] && continue
-      fn="${url##*/}"
-      dest="$COMFY_DIR/models/$dir/$fn"
-      if [ -s "$dest" ]; then echo "[models] have $fn"; continue; fi
-      mkdir -p "$COMFY_DIR/models/$dir"
-      # (a) R2 cache
-      if [ "$R2" = 1 ] && rclone copyto "r2:$R2_BUCKET/models/$dir/$fn" "$dest.part" 2>/dev/null && [ -s "$dest.part" ]; then
-        mv "$dest.part" "$dest"; echo "[models] R2 hit -> $fn"; continue
-      fi
-      rm -f "$dest.part"
-      # (b) origin (HF)
-      echo "[models] origin download -> $fn"
-      hdr=()
-      [ -n "${HF_TOKEN:-}" ] && hdr=(--header="Authorization: Bearer $HF_TOKEN")
-      if wget -q "${hdr[@]}" -c -O "$dest.part" "$url"; then
-        mv "$dest.part" "$dest"; echo "[models] origin done -> $fn"
-        # Caching to R2 is handled by the background sync below — NOT inline,
-        # so a slow 28GB upload never blocks the next download.
-      else
-        echo "[models] FAILED $fn — gated? check HF_TOKEN and license acceptance"
-        rm -f "$dest.part"
-      fi
-    done < "$MANIFEST"
-    echo "[models] all downloads complete"
-    touch "$DONE_MARK"
-  ) &
-
-  # Heartbeat: every 30s, report files-done + bytes-on-disk so a long silent
-  # transfer (R2 pull or origin download) clearly still looks alive.
-  ( while [ ! -f "$DONE_MARK" ]; do
-      sleep 30
-      n="$(find "$COMFY_DIR/models" -type f ! -name '*.part*' 2>/dev/null | wc -l | tr -d ' ')"
-      cur="$(ls -S "$COMFY_DIR"/models/*/*.part* 2>/dev/null | head -1)"
-      msg="$n files, $(du -sh "$COMFY_DIR/models" 2>/dev/null | cut -f1) on disk"
-      [ -n "$cur" ] && msg="$msg; fetching $(basename "$cur") @ $(du -h "$cur" 2>/dev/null | cut -f1)"
-      echo "[models] ...still working — $msg"
-    done ) &
-
-  # Cache completed models up to R2 in the BACKGROUND (incremental; skips
-  # in-progress *.part* files). Stops after downloads finish, with a final pass.
-  if [ "$R2" = 1 ]; then
-    ( while [ ! -f "$DONE_MARK" ]; do
-        rclone copy "$COMFY_DIR/models" "r2:$R2_BUCKET/models" \
-          --exclude "*.part*" --no-traverse 2>/dev/null
-        sleep 120
-      done
-      rclone copy "$COMFY_DIR/models" "r2:$R2_BUCKET/models" \
-        --exclude "*.part*" --no-traverse 2>/dev/null
-      echo "[models] R2 cache seeding complete"
-    ) &
-  fi
-fi
-
-# 5) Persist outputs + live user-dir edits to R2 in the background (every 30s).
-#    Up to the last 30s may not sync on an abrupt stop. Both are additive copies
-#    (rclone copy, not sync) — deletions/renames don't propagate to R2, so prune
-#    R2 manually if you remove a workflow.
-if [ "$R2" = 1 ]; then
-  OUT="$COMFY_DIR/output"; mkdir -p "$OUT"
-  log "syncing outputs -> r2:$R2_BUCKET/outputs and user dir -> r2:$R2_BUCKET/user every 30s..."
-  ( while true; do
-      rclone copy "$OUT" "r2:$R2_BUCKET/outputs" --no-traverse 2>/dev/null
-      rclone copy "$COMFY_DIR/user" "r2:$R2_BUCKET/user" \
-        --exclude "__manager/cache/**" --exclude "*.log" --exclude "comfyui.db*" \
-        --no-traverse 2>/dev/null
-      sleep 30
-    done ) &
-fi
-
-# 6) Auto-snapshot: watch custom_nodes and push a fresh Manager snapshot to R2
-#    whenever nodes are installed / updated / removed (debounced). Keeps
-#    r2:$R2_BUCKET/snapshot.json current so the next cold start restores exactly
-#    this node set. Starts AFTER the boot restore above so it never reacts to the
-#    restore's own re-cloning or captures a half-installed state.
-if [ "$R2" = 1 ]; then
-  log "starting custom_nodes snapshot watcher -> r2:$R2_BUCKET/snapshot.json (on change)..."
-  snapshot_watch &
+  start_r2_persistence
 fi
 
 log "handing off to /start.sh"

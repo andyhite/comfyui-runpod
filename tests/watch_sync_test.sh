@@ -131,4 +131,39 @@ restore_and_watch "$WORK/dir" models "$GLOBAL_INOTIFY_EXCLUDE" "${GLOBAL_RCLONE_
 grep -q "^watch models$" "$WATCH_LOG" || fail "restore_and_watch did not start watcher on success"
 pass "restore_and_watch starts watcher when restore succeeds"
 
+# --- start_r2_persistence: orchestration + gating ----------------------------
+ORCH_LOG="$WORK/orch.log"; : > "$ORCH_LOG"
+COMFY_DIR="$WORK/comfy"; mkdir -p "$COMFY_DIR/custom_nodes"
+# Override the primitives to record calls instead of touching R2.
+restore_dir()       { echo "restore $2" >> "$ORCH_LOG"; [ "$2" = "${FAIL_SUBPATH:-}" ] && return 1; return 0; }
+start_watcher()     { echo "watch $2"   >> "$ORCH_LOG"; }
+install_node_deps() { echo "install_node_deps" >> "$ORCH_LOG"; }
+
+# All restores succeed: every dir restored + watched, deps installed once.
+: > "$ORCH_LOG"; unset FAIL_SUBPATH
+start_r2_persistence; wait
+for want in "restore custom_nodes" "install_node_deps" "watch custom_nodes" \
+            "restore user" "watch user" "restore models" "watch models" \
+            "restore output" "watch output"; do
+  grep -qx "$want" "$ORCH_LOG" || fail "start_r2_persistence missing: $want"
+done
+pass "start_r2_persistence restores + watches all four dirs and installs deps"
+
+# user restore fails: user watcher must NOT start; others unaffected.
+: > "$ORCH_LOG"; export FAIL_SUBPATH=user
+start_r2_persistence; wait
+grep -qx "watch user" "$ORCH_LOG" && fail "user watcher started despite restore failure"
+grep -qx "watch custom_nodes" "$ORCH_LOG" || fail "custom_nodes watcher missing"
+grep -qx "watch models" "$ORCH_LOG" || fail "models watcher missing"
+unset FAIL_SUBPATH
+pass "start_r2_persistence gates the user watcher on its restore"
+
+# custom_nodes restore fails: no dep install, no custom_nodes watcher.
+: > "$ORCH_LOG"; export FAIL_SUBPATH=custom_nodes
+start_r2_persistence; wait
+grep -qx "install_node_deps" "$ORCH_LOG" && fail "deps installed despite custom_nodes restore failure"
+grep -qx "watch custom_nodes" "$ORCH_LOG" && fail "custom_nodes watcher started despite restore failure"
+unset FAIL_SUBPATH
+pass "start_r2_persistence skips dep install + watcher when custom_nodes restore fails"
+
 echo "ALL PASS"
