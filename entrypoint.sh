@@ -126,14 +126,14 @@ if [ ! -d "$COMFY_DIR" ]; then
   cp -r "$BAKED" "$COMFY_DIR"
 fi
 
-# 2) Restore the Manager snapshot (idempotent — skip if unchanged on this disk).
-SNAP="$UPLOADS/snapshot.json"
-MARKER="$COMFY_DIR/.dstack-applied-snapshot.sha"
-if [ -f "$SNAP" ]; then
+# 2) Restore the Manager snapshot from R2 (idempotent — skip if unchanged on
+#    this disk). R2 is the source of truth; the watcher (step 6) keeps it fresh.
+#    First-ever run (or no R2) has no snapshot: come up on the base image nodes.
+SNAP=/tmp/snapshot.json
+if [ "$R2" = 1 ] && rclone copyto "r2:$R2_BUCKET/snapshot.json" "$SNAP" 2>/dev/null && [ -s "$SNAP" ]; then
   sum="$(sha256sum "$SNAP" | cut -d' ' -f1)"
   if [ "$(cat "$MARKER" 2>/dev/null || true)" != "$sum" ]; then
-    CM_CLI="$COMFY_DIR/custom_nodes/ComfyUI-Manager/cm-cli.py"
-    log "restoring ComfyUI-Manager snapshot..."
+    log "restoring ComfyUI-Manager snapshot from R2..."
     if python3.12 "$CM_CLI" restore-snapshot "$SNAP"; then
       # restore-snapshot re-clones the nodes but does NOT install their pip deps
       # (e.g. Impact Pack -> scikit-image, WAS -> numba). restore-dependencies
@@ -148,6 +148,8 @@ if [ -f "$SNAP" ]; then
   else
     log "snapshot unchanged — skipping restore."
   fi
+else
+  log "no snapshot in R2 (or R2 disabled) — starting with base image nodes."
 fi
 
 # 3) User dir (workflows, __manager/config.ini, comfy settings, etc.) is your
@@ -240,6 +242,16 @@ if [ "$R2" = 1 ]; then
         --no-traverse 2>/dev/null
       sleep 30
     done ) &
+fi
+
+# 6) Auto-snapshot: watch custom_nodes and push a fresh Manager snapshot to R2
+#    whenever nodes are installed / updated / removed (debounced). Keeps
+#    r2:$R2_BUCKET/snapshot.json current so the next cold start restores exactly
+#    this node set. Starts AFTER the boot restore above so it never reacts to the
+#    restore's own re-cloning or captures a half-installed state.
+if [ "$R2" = 1 ]; then
+  log "starting custom_nodes snapshot watcher -> r2:$R2_BUCKET/snapshot.json (on change)..."
+  snapshot_watch &
 fi
 
 log "handing off to /start.sh"
