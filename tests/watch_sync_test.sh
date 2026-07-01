@@ -86,6 +86,7 @@ restore_dir "$WORK/dir" custom_nodes "${GLOBAL_RCLONE_EXCLUDES[@]}" \
 grep -q "^copy r2:testbucket/custom_nodes $WORK/dir" "$RCLONE_LOG" \
   || fail "restore_dir wrong copy source/dest"
 grep -q -- "--exclude .venv/\*\*" "$RCLONE_LOG" || fail "restore_dir missing .venv exclude"
+[ "$(grep -c "^lsf " "$RCLONE_LOG")" = "1" ] || fail "restore_dir should call rclone lsf exactly once"
 pass "restore_dir copies R2->local with excludes when data present"
 
 # --- restore_dir: copy failure ----------------------------------------------

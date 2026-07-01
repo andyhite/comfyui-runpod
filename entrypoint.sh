@@ -50,11 +50,18 @@ USER_INOTIFY_EXCLUDE='(/\.venv/|/venv/|/__pycache__/|\.pyc$|\.part|\.tmp$|\.log$
 restore_dir() {
   local local_dir="$1" subpath="$2"; shift 2
   mkdir -p "$local_dir"
-  if ! rclone lsf "r2:$R2_BUCKET/$subpath" >/dev/null 2>&1; then
+  # One lsf call: its exit code gates "unreachable" (fail closed -> return 1, no
+  # copy) and its captured output gates "empty prefix" (fresh -> return 0, no
+  # copy). Do NOT split into two calls — a transient failure on a second call
+  # with empty output would be misread as "fresh" and wrongly start the watcher
+  # against a degraded R2. `local listing` is declared separately so the
+  # assignment's exit code (not `local`'s) drives the `if`.
+  local listing
+  if ! listing="$(rclone lsf "r2:$R2_BUCKET/$subpath" 2>/dev/null)"; then
     log "cannot list r2:$R2_BUCKET/$subpath (R2 unreachable?) — NOT starting its watcher"
     return 1
   fi
-  if [ -z "$(rclone lsf "r2:$R2_BUCKET/$subpath" 2>/dev/null | head -1)" ]; then
+  if [ -z "$listing" ]; then
     log "r2:$R2_BUCKET/$subpath is empty — fresh; watcher will seed it"
     return 0
   fi
