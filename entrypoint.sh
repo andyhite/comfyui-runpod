@@ -18,7 +18,6 @@ set -uo pipefail
 
 COMFY_DIR=/workspace/runpod-slim/ComfyUI
 BAKED=/opt/comfyui-baked
-UPLOADS=/opt/uploads
 export COMFYUI_PATH="$COMFY_DIR"
 
 log() { echo "[dstack-entry] $*"; }

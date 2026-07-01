@@ -1,3 +1,7 @@
+> **SUPERSEDED (2026-07-01)** by the R2 directory-mirror design
+> (`docs/superpowers/specs/2026-07-01-r2-mirror-design.md`). The snapshot-based
+> approach described below is no longer implemented.
+
 # R2-backed auto-snapshots Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

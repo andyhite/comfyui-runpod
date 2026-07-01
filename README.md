@@ -12,26 +12,16 @@ declaratively.
   driver and dstack can't filter by driver, the config whitelists CUDA-13 GPU
   architectures, and the entrypoint runs a CUDA preflight that exits so dstack's
   `retry` lands a working host.
-- **`pod/` payload**, synced to the pod on every `make up` via dstack `files:`:
-  - The **custom-node snapshot** is *not* in `pod/` — it lives in R2. It is
-    restored at boot (`cm-cli restore-snapshot`) and re-uploaded automatically
-    whenever `custom_nodes` changes (see Persistence below).
-  - `pod/models.txt` — the model download manifest (`<models/ subdir>  <URL>`).
-  - The **user dir** (workflows + `__manager/config.ini`) is *not* in `pod/`; it
-    lives in R2 and is restored/persisted by the entrypoint (see Persistence below).
-- **`entrypoint.sh`** at boot: populate ComfyUI → restore the snapshot from R2
-  (idempotent, skipped if unchanged) → restore the user dir from R2 → hand off to
-  the image's `/start.sh` (venv, ComfyUI, SSH, JupyterLab, FileBrowser) → watch
-  `custom_nodes` and re-upload the snapshot to R2 on change.
-
-**R2-owned snapshot:** there is no committed snapshot and no build-time bake.
-R2 is the source of truth. Install/update/remove custom nodes the normal way
-(ComfyUI-Manager UI, or git in `custom_nodes/`) and a background `inotifywait`
-watcher debounces the change, regenerates the snapshot, and uploads it to
-`r2://comfyui/snapshot.json` — only when it actually changed. The next cold start
-restores that snapshot as a **delta** over the base image nodes (an unchanged
-snapshot skips restore via a checksum marker). First-ever boot (empty R2) comes
-up on base nodes; install what you want and the watcher seeds R2.
+- **R2 is an exact mirror** of four directories: `custom_nodes/`, `user/`,
+  `models/`, and `output/`. Nothing is uploaded to the pod — everything the pod
+  needs is restored from R2 at boot.
+- **`entrypoint.sh`** at boot: populate ComfyUI from the baked image if the disk
+  is fresh → restore `custom_nodes` and `user` from R2 (blocking) → install
+  custom-node dependencies → restore `models` and `output` from R2 in the
+  background (ComfyUI comes up while they stream) → hand off to the image's
+  `/start.sh` (venv, ComfyUI, SSH, JupyterLab, FileBrowser). A filesystem watcher
+  per directory then mirrors any change back to R2, starting only once that
+  directory's restore has succeeded.
 
 ## Usage
 
@@ -39,57 +29,43 @@ up on base nodes; install what you want and the watcher seeds R2.
 make image-build   # once (and when entrypoint.sh changes); needs `docker login ghcr.io`
 make server        # terminal 1, leave running
 make fleet         # once — registers the instance pool dstack provisions into
-make up            # provision pod + upload payload + attach
+make up            # provision pod + attach
 # → http://localhost:8188 (ComfyUI), :8888 (Jupyter), :8080 (FileBrowser)
 make down          # tear down
 ```
 
-Custom nodes are snapshotted to R2 automatically — just install them on the pod
-(ComfyUI-Manager) and the watcher keeps `r2://comfyui/snapshot.json` current.
+Install models and nodes on the running pod (ComfyUI-Manager); they mirror to
+R2 automatically.
 
-## Trade-offs & not-yet-wired
+## Trade-offs & Persistence
 
-- **Boot cost:** a cold start clones + installs every node in the R2 snapshot
-  (no bake). Node deps download fresh each boot; models are cached in R2 (below).
-  If cold-start time becomes a problem, re-introducing a build-time bake of the
-  stable node set is the lever to pull.
-- **Models** — declared in `pod/models.txt` (`<models/ subdir>  <URL>`), synced via
-  `files:`, downloaded at boot in the background (idempotent). Gated repos (Flux.2
-  Klein 9B) need an HF token + license acceptance at
-  huggingface.co/black-forest-labs/FLUX.2-klein-9B.
-- **Persistence (R2)** — an R2 bucket (`comfyui`) is the persistence layer:
-  - **Models cache** (`r2://comfyui/models`): each boot pulls from R2; on a miss it
-    downloads from origin and caches back up. First boot seeds R2 (slow); later
-    boots are fast (free egress, gated model no longer needs the token).
-  - **Snapshot** (`r2://comfyui/snapshot.json`): the ComfyUI-Manager snapshot of
-    your custom nodes. Restored at boot and re-uploaded automatically whenever
-    `custom_nodes` changes (debounced ~30s; only on a real change). This is the
-    only place the node set is persisted — there is no committed copy.
-  - **Outputs** (`r2://comfyui/outputs`): synced every 30s so they survive teardown.
-  - **User dir** (`r2://comfyui/user`): workflows, `__manager/config.ini`, comfy
-    settings — your live state, kept entirely in R2. Restored at boot and pushed
-    back every 30s, so edits persist across pods with no repo commit. A fresh pod
-    with no R2 starts from an empty user dir. Additive copy, so deletions don't
-    propagate (prune R2 manually). Excludes `__manager/cache`, `*.log`, and
-    `comfyui.db*` (a live SQLite DB — unsafe to file-copy, and regenerated by
-    ComfyUI anyway).
-  - rclone (in the image) is configured via `RCLONE_CONFIG_R2_*` env from dstack
-    secrets. No R2 secrets → models from origin only, outputs not persisted.
-
-  Setup: `make r2-bucket` (done), then `make secrets-help` for the secrets to set
-  (`HF_TOKEN`, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`) — account-
-  specific values stay out of this public repo. Create the R2 API token in the
+- **Models** — R2 is the sole source; there's no manifest. A first-ever boot
+  against an empty R2 has zero models. Download what you need once
+  (ComfyUI-Manager, or the MCP download tool) and the watcher seeds R2; every
+  later boot restores from there. Gated repos (Flux.2 Klein 9B) still need an HF
+  token + license acceptance at huggingface.co/black-forest-labs/FLUX.2-klein-9B.
+- **Persistence** — R2 mirrors `custom_nodes/`, `user/`, `models/`, and
+  `output/` exactly. Restore (R2 → pod) uses `copy`; the running mirror
+  (pod → R2) uses `sync`, so deletions and renames propagate to R2 — delete
+  something on the pod and it's gone from R2 after the next debounce.
+- **Excludes** — `.venv`, `venv`, `__pycache__`, `*.pyc`, `*.part*`, `*.tmp`,
+  `*.log`, and `comfyui.db*` are excluded everywhere; `user` additionally
+  excludes `__manager/cache/**`. `.git` is kept, so ComfyUI-Manager can still
+  identify each node's repo and version.
+- **Safety** — a directory's watcher starts only after its restore succeeds, so
+  a degraded boot can never wipe R2.
+- **Setup** — unchanged: `make r2-bucket` (once), then `make secrets-help` for
+  the secrets to set (`HF_TOKEN`, `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`,
+  `R2_SECRET_ACCESS_KEY`) — account-specific values stay out of this public
+  repo. `HF_TOKEN` is now optional: it's only used by nodes that call Hugging
+  Face at runtime, not for model seeding. Create the R2 API token in the
   Cloudflare dashboard (R2 → Manage R2 API Tokens → Object Read & Write).
-- **Outputs / persistence** — *not handled yet.* No network volume, so outputs are
-  on ephemeral disk. Download via the UI before `make down`, or wire object-storage
-  sync (R2/S3).
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `Dockerfile`, `entrypoint.sh` | custom image |
-| `comfyui.dstack.yml` | the run (task): image, GPU, ports, `files:` |
+| `Dockerfile`, `entrypoint.sh` | custom image; entrypoint restores + mirrors the four R2 directories |
+| `comfyui.dstack.yml` | the run (task): image, GPU, ports, R2 env |
 | `comfyui-fleet.dstack.yml` | the instance pool |
-| `pod/` | model list synced to the pod (snapshot + user dir live in R2) |
 | `Makefile` | commands |
