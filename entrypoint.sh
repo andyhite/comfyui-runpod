@@ -88,7 +88,8 @@ fi
 if [ "$R2" = 1 ]; then
   log "overlaying live user dir from R2 (your saved edits win)..."
   rclone copy "r2:$R2_BUCKET/user" "$COMFY_DIR/user" \
-    --exclude "__manager/cache/**" 2>/dev/null || true
+    --exclude "__manager/cache/**" --exclude "*.log" --exclude "comfyui.db*" \
+    2>/dev/null || true
 fi
 
 # 4) Models in the BACKGROUND: R2 cache -> origin (HF) -> cache up to R2.
@@ -165,7 +166,8 @@ if [ "$R2" = 1 ]; then
   ( while true; do
       rclone copy "$OUT" "r2:$R2_BUCKET/outputs" --no-traverse 2>/dev/null
       rclone copy "$COMFY_DIR/user" "r2:$R2_BUCKET/user" \
-        --exclude "__manager/cache/**" --no-traverse 2>/dev/null
+        --exclude "__manager/cache/**" --exclude "*.log" --exclude "comfyui.db*" \
+        --no-traverse 2>/dev/null
       sleep 30
     done ) &
 fi
