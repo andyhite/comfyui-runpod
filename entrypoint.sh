@@ -5,9 +5,9 @@
 # (volume-less) disk before ComfyUI launches:
 #   1. populate ComfyUI from the baked copy
 #   2. restore the ComfyUI-Manager snapshot uploaded via `files:` (idempotent)
-#   3. lay in the user dir (workflows + __manager config) uploaded via `files:`
+#   3. restore the user dir (workflows + __manager config) from R2
 #   4. download models (background): R2 cache -> origin (HF) -> cache up to R2
-#   5. sync outputs -> R2 in the background (so they survive termination)
+#   5. sync outputs + user dir -> R2 in the background (so they survive termination)
 # then hand off to /start.sh, which creates the venv and launches ComfyUI, SSH,
 # JupyterLab, and FileBrowser.
 #
@@ -76,17 +76,13 @@ if [ -f "$SNAP" ]; then
   fi
 fi
 
-# 3) User dir (workflows, __manager/config.ini, comfy settings, etc.):
-#    - the repo's `files:` copy is the BASELINE/seed (version-controlled)
-#    - the R2 copy is your LIVE state (edits made on previous pods), overlaid
-#      ON TOP so changes persist instead of being reset to the committed version.
-#    The __manager/cache is large and regenerable, so it's excluded from R2.
-if [ -d "$UPLOADS/user" ]; then
-  log "seeding user dir from repo (baseline)..."
-  cp -r "$UPLOADS/user/." "$COMFY_DIR/user/" 2>/dev/null || true
-fi
+# 3) User dir (workflows, __manager/config.ini, comfy settings, etc.) is your
+#    LIVE state, persisted entirely in R2 — restored here at boot and pushed back
+#    every 30s (see step 5). No repo baseline: the baked ComfyUI ships an empty
+#    user dir, so a fresh pod with no R2 just starts clean. __manager/cache is
+#    large and regenerable, so it's excluded.
 if [ "$R2" = 1 ]; then
-  log "overlaying live user dir from R2 (your saved edits win)..."
+  log "restoring live user dir from R2..."
   rclone copy "r2:$R2_BUCKET/user" "$COMFY_DIR/user" \
     --exclude "__manager/cache/**" --exclude "*.log" --exclude "comfyui.db*" \
     2>/dev/null || true

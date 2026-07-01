@@ -4,12 +4,13 @@
 #   make image-build     # build & push the custom image (once; and when entrypoint.sh changes)
 #   make server          # terminal 1 — leave running
 #   make fleet           # register the instance pool (once)
-#   make up              # provision the pod (uploads snapshot/workflows/config) + attach
+#   make up              # provision the pod (uploads snapshot + model list) + attach
 #   open http://localhost:8188   (ComfyUI; also 8888 Jupyter, 8080 FileBrowser)
 #   make down            # tear the pod down when finished
 #
-# Day-to-day: edit pod/snapshot.json, pod/workflows, or pod/user, then `make up`.
-# No image rebuild needed for those — only when entrypoint.sh changes.
+# Day-to-day: edit pod/snapshot.json or pod/models.txt, then `make up`. No image
+# rebuild needed for those — only when entrypoint.sh changes. Workflows + config
+# live in the user dir, which persists to R2 automatically (no repo edit needed).
 
 # Custom image (must match `image:` in comfyui.dstack.yml). RunPod is x86_64.
 IMAGE        ?= ghcr.io/andyhite/comfyui-runpod
@@ -18,7 +19,7 @@ PLATFORM     ?= linux/amd64
 
 # dstack control-plane server (port default avoids the common 3000 clash).
 DSTACK_PORT  ?= 3333
-# Raise the `files:` upload cap so larger workflow/config sets are allowed.
+# Raise the `files:` upload cap so a larger snapshot.json is allowed.
 UPLOAD_LIMIT ?= 104857600  # 100 MB
 
 # Run/fleet/config names and files.
@@ -49,7 +50,7 @@ server: ## Start the dstack server (foreground; leave running). Override: make s
 fleet: ## Register/refresh the instance pool (one-time; re-run after editing the fleet)
 	dstack apply -y -f $(FLEET_FILE)
 
-up: ## Provision the pod + attach (uploads snapshot/workflows/config via files:)
+up: ## Provision the pod + attach (uploads snapshot + model list via files:)
 	dstack apply -y -f $(TASK_FILE)
 
 down: ## Stop and tear down the pod

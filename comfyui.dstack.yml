@@ -21,10 +21,11 @@ retry:
 
 # Sync the small declarative bits to the pod on every `apply`. They stage at
 # /opt/uploads; the image entrypoint lays them into ComfyUI at boot. Updating
-# nodes (snapshot.json), workflows, config, or the model list needs NO rebuild.
+# nodes (snapshot.json) or the model list (models.txt) needs NO rebuild. The
+# user dir (workflows + config) is NOT shipped here — it lives in R2 and is
+# restored/persisted by the entrypoint.
 files:
   - ./pod/snapshot.json:/opt/uploads/snapshot.json
-  - ./pod/user:/opt/uploads/user
   - ./pod/models.txt:/opt/uploads/models.txt
 
 # Secrets (set once with `dstack secret set <NAME> <value>`) — keeps account-
@@ -85,7 +86,7 @@ utilization_policy:
   time_window: 3h
 
 # No `commands`: the custom image's entrypoint handles populate + snapshot
-# restore + workflow/config injection, then execs the base image's /start.sh.
+# restore + user-dir restore from R2, then execs the base image's /start.sh.
 
 # Persistence is via R2 (see env above): models are cached in r2://comfyui/models
 # and outputs are synced to r2://comfyui/outputs every 30s by the entrypoint.

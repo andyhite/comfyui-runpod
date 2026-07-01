@@ -1,9 +1,8 @@
 # Custom ComfyUI image for RunPod + dstack.
 #
 # A thin wrapper over RunPod's official image. It only adds a smart entrypoint
-# that, at boot, restores a ComfyUI-Manager snapshot and lays in the workflows /
-# config that dstack uploads via `files:`, then hands off to the base image's
-# /start.sh.
+# that, at boot, restores a ComfyUI-Manager snapshot and the R2-persisted user
+# dir (workflows / config), then hands off to the base image's /start.sh.
 #
 # HYBRID model:
 #   - Bake the snapshot below so cold starts skip clone/install for the stable set.
