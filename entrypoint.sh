@@ -170,7 +170,7 @@ if [ -n "${RCLONE_CONFIG_R2_ACCESS_KEY_ID:-}" ] && [ -n "${R2_BUCKET:-}" ] && [ 
   export RCLONE_CONFIG_R2_ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
   R2=1; log "R2 persistence enabled (bucket: $R2_BUCKET)"
 else
-  log "R2 not configured — models from origin only, outputs not persisted"
+  log "R2 not configured — no persistence (custom_nodes/user/models/output not restored or mirrored)"
 fi
 
 # 1) Fresh disk: populate ComfyUI ourselves so we can modify it before launch.

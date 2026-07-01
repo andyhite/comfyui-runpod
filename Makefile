@@ -64,7 +64,7 @@ ps: ## List runs
 status: ## Show detailed status for this run
 	dstack ps -v -n 1
 
-r2-bucket: ## Create the R2 bucket for the model cache + outputs (one-time)
+r2-bucket: ## Create the R2 bucket for the directory mirror (one-time)
 	npx -y wrangler@latest r2 bucket create $(R2_BUCKET)
 
 secrets-help: ## Show the dstack secrets to set (HF + R2)
