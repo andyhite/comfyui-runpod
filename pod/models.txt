@@ -19,6 +19,9 @@ loras              https://huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged/r
 loras              https://huggingface.co/styly-agents/Wan2-2-pixel-animate/resolve/main/wan2.2_animate_adapter_model.safetensors
 
 # --- Flux.2 Klein 9B (the diffusion model is GATED — needs HF_TOKEN + license) ---
+# The 9B model needs the 8B-class text encoder (4096-dim). The 4B repo's
+# qwen_3_4b (2560-dim) is for Klein *4B* and mismatches the 9B model
+# (KSampler: "mat1 and mat2 shapes cannot be multiplied ... 7680 vs 12288").
 diffusion_models   https://huggingface.co/black-forest-labs/FLUX.2-klein-9B/resolve/main/flux-2-klein-9b.safetensors
-text_encoders      https://huggingface.co/Comfy-Org/flux2-klein/resolve/main/split_files/text_encoders/qwen_3_4b.safetensors
+text_encoders      https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-9b/resolve/main/split_files/text_encoders/qwen_3_8b_fp8mixed.safetensors
 vae                https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/vae/flux2-vae.safetensors
