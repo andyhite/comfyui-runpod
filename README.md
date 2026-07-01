@@ -13,22 +13,25 @@ declaratively.
   architectures, and the entrypoint runs a CUDA preflight that exits so dstack's
   `retry` lands a working host.
 - **`pod/` payload**, synced to the pod on every `make up` via dstack `files:`:
-  - `pod/snapshot.json` — a **ComfyUI-Manager snapshot**: your custom nodes, pinned
-    to commits, with their pip deps. Restored at boot (`cm-cli restore-snapshot`).
+  - The **custom-node snapshot** is *not* in `pod/` — it lives in R2. It is
+    restored at boot (`cm-cli restore-snapshot`) and re-uploaded automatically
+    whenever `custom_nodes` changes (see Persistence below).
   - `pod/models.txt` — the model download manifest (`<models/ subdir>  <URL>`).
   - The **user dir** (workflows + `__manager/config.ini`) is *not* in `pod/`; it
     lives in R2 and is restored/persisted by the entrypoint (see Persistence below).
-- **`entrypoint.sh`** at boot: populate ComfyUI → restore the snapshot (idempotent,
-  skipped if unchanged) → restore the user dir from R2 → hand off to the image's
-  `/start.sh` (venv, ComfyUI, SSH, JupyterLab, FileBrowser).
+- **`entrypoint.sh`** at boot: populate ComfyUI → restore the snapshot from R2
+  (idempotent, skipped if unchanged) → restore the user dir from R2 → hand off to
+  the image's `/start.sh` (venv, ComfyUI, SSH, JupyterLab, FileBrowser) → watch
+  `custom_nodes` and re-upload the snapshot to R2 on change.
 
-**Hybrid bake + overlay (default):** the image **bakes** the snapshot at build
-time (fast cold starts — nodes pre-installed), while `files:` still ships the
-*current* snapshot every `make up`. At boot, `restore-snapshot` applies only the
-**delta** since the last bake — so you add/update nodes by editing
-`pod/snapshot.json` and re-running `make up` (no rebuild), and `make image-build`
-periodically to re-bake when the delta grows. An unchanged snapshot skips restore
-entirely (the bake writes its checksum as the boot idempotency marker).
+**R2-owned snapshot:** there is no committed snapshot and no build-time bake.
+R2 is the source of truth. Install/update/remove custom nodes the normal way
+(ComfyUI-Manager UI, or git in `custom_nodes/`) and a background `inotifywait`
+watcher debounces the change, regenerates the snapshot, and uploads it to
+`r2://comfyui/snapshot.json` — only when it actually changed. The next cold start
+restores that snapshot as a **delta** over the base image nodes (an unchanged
+snapshot skips restore via a checksum marker). First-ever boot (empty R2) comes
+up on base nodes; install what you want and the watcher seeds R2.
 
 ## Usage
 
@@ -41,14 +44,15 @@ make up            # provision pod + upload payload + attach
 make down          # tear down
 ```
 
-Generate `pod/snapshot.json` from a working setup: `make snapshot-help`.
+Custom nodes are snapshotted to R2 automatically — just install them on the pod
+(ComfyUI-Manager) and the watcher keeps `r2://comfyui/snapshot.json` current.
 
 ## Trade-offs & not-yet-wired
 
-- **Boot cost:** mostly handled by the hybrid bake — cold starts only install the
-  *delta* between the baked snapshot and the current one. Keep it small by
-  re-baking (`make image-build`) when you've accumulated node changes. (Building on
-  an Apple-silicon Mac uses amd64 emulation, so the bake step is slower there.)
+- **Boot cost:** a cold start clones + installs every node in the R2 snapshot
+  (no bake). Node deps download fresh each boot; models are cached in R2 (below).
+  If cold-start time becomes a problem, re-introducing a build-time bake of the
+  stable node set is the lever to pull.
 - **Models** — declared in `pod/models.txt` (`<models/ subdir>  <URL>`), synced via
   `files:`, downloaded at boot in the background (idempotent). Gated repos (Flux.2
   Klein 9B) need an HF token + license acceptance at
@@ -57,6 +61,10 @@ Generate `pod/snapshot.json` from a working setup: `make snapshot-help`.
   - **Models cache** (`r2://comfyui/models`): each boot pulls from R2; on a miss it
     downloads from origin and caches back up. First boot seeds R2 (slow); later
     boots are fast (free egress, gated model no longer needs the token).
+  - **Snapshot** (`r2://comfyui/snapshot.json`): the ComfyUI-Manager snapshot of
+    your custom nodes. Restored at boot and re-uploaded automatically whenever
+    `custom_nodes` changes (debounced ~30s; only on a real change). This is the
+    only place the node set is persisted — there is no committed copy.
   - **Outputs** (`r2://comfyui/outputs`): synced every 30s so they survive teardown.
   - **User dir** (`r2://comfyui/user`): workflows, `__manager/config.ini`, comfy
     settings — your live state, kept entirely in R2. Restored at boot and pushed
@@ -83,5 +91,5 @@ Generate `pod/snapshot.json` from a working setup: `make snapshot-help`.
 | `Dockerfile`, `entrypoint.sh` | custom image |
 | `comfyui.dstack.yml` | the run (task): image, GPU, ports, `files:` |
 | `comfyui-fleet.dstack.yml` | the instance pool |
-| `pod/` | snapshot + model list synced to the pod (user dir lives in R2) |
+| `pod/` | model list synced to the pod (snapshot + user dir live in R2) |
 | `Makefile` | commands |

@@ -4,13 +4,13 @@
 #   make image-build     # build & push the custom image (once; and when entrypoint.sh changes)
 #   make server          # terminal 1 — leave running
 #   make fleet           # register the instance pool (once)
-#   make up              # provision the pod (uploads snapshot + model list) + attach
+#   make up              # provision the pod (uploads model list) + attach
 #   open http://localhost:8188   (ComfyUI; also 8888 Jupyter, 8080 FileBrowser)
 #   make down            # tear the pod down when finished
 #
-# Day-to-day: edit pod/snapshot.json or pod/models.txt, then `make up`. No image
-# rebuild needed for those — only when entrypoint.sh changes. Workflows + config
-# live in the user dir, which persists to R2 automatically (no repo edit needed).
+# Day-to-day: edit pod/models.txt, then `make up`. No image rebuild needed for
+# that — only when entrypoint.sh changes. Custom nodes are snapshotted to R2
+# automatically on change; workflows + config persist to R2 too (no repo edit).
 
 # Custom image (must match `image:` in comfyui.dstack.yml). RunPod is x86_64.
 IMAGE        ?= ghcr.io/andyhite/comfyui-runpod
@@ -19,7 +19,7 @@ PLATFORM     ?= linux/amd64
 
 # dstack control-plane server (port default avoids the common 3000 clash).
 DSTACK_PORT  ?= 3333
-# Raise the `files:` upload cap so a larger snapshot.json is allowed.
+# Raise the `files:` upload cap (for model manifests and configs).
 UPLOAD_LIMIT ?= 104857600  # 100 MB
 
 # Run/fleet/config names and files.
@@ -27,14 +27,11 @@ RUN          ?= comfyui
 TASK_FILE    ?= comfyui.dstack.yml
 FLEET_FILE   ?= comfyui-fleet.dstack.yml
 
-COMFY_DIR    := /workspace/runpod-slim/ComfyUI
-CM_CLI       := $(COMFY_DIR)/custom_nodes/ComfyUI-Manager/cm-cli.py
-
 .DEFAULT_GOAL := help
 
 R2_BUCKET    ?= comfyui
 
-.PHONY: help image-build server fleet up down logs attach ps status snapshot-help \
+.PHONY: help image-build server fleet up down logs attach ps status \
         r2-bucket secrets-help
 
 help: ## Show this help
@@ -50,7 +47,7 @@ server: ## Start the dstack server (foreground; leave running). Override: make s
 fleet: ## Register/refresh the instance pool (one-time; re-run after editing the fleet)
 	dstack apply -y -f $(FLEET_FILE)
 
-up: ## Provision the pod + attach (uploads snapshot + model list via files:)
+up: ## Provision the pod + attach (uploads model list via files:)
 	dstack apply -y -f $(TASK_FILE)
 
 down: ## Stop and tear down the pod
@@ -81,11 +78,3 @@ secrets-help: ## Show the dstack secrets to set (HF + R2)
 	@echo "  Cloudflare dashboard -> R2 -> Manage R2 API Tokens -> Create API token"
 	@echo "  -> Object Read & Write (scope to the '$(R2_BUCKET)' bucket)."
 
-snapshot-help: ## How to generate pod/snapshot.json from a running pod
-	@echo "1. make up, then SSH/Jupyter into the pod (or use the ComfyUI-Manager UI)."
-	@echo "2. Install the custom nodes you want via ComfyUI-Manager."
-	@echo "3. Export the snapshot on the pod:"
-	@echo "     COMFYUI_PATH=$(COMFY_DIR) python3.12 $(CM_CLI) \\"
-	@echo "       save-snapshot --output /workspace/snapshot.json"
-	@echo "4. Download /workspace/snapshot.json (FileBrowser :8080 or Jupyter :8888)"
-	@echo "   to ./pod/snapshot.json here, then commit. Next 'make up' applies it."
