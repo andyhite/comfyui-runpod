@@ -50,6 +50,7 @@ snapshot_seed() {
     BASELINE_SHA=""
     log_snap "baseline seed failed — first change will upload"
   fi
+  return 0
 }
 
 # Regenerate the snapshot; if it changed vs BASELINE_SHA, upload to R2 and
@@ -72,6 +73,7 @@ snapshot_reconcile() {
   else
     log_snap "upload failed ($reason) — will retry on next event"
   fi
+  return 0
 }
 
 # Seed the baseline, then watch custom_nodes and reconcile on each debounced
@@ -87,6 +89,7 @@ snapshot_watch() {
     while read -r -t "${SNAPSHOT_DEBOUNCE:-30}" _; do :; done
     snapshot_reconcile "custom_nodes change"
   done
+  return 0
 }
 
 # When sourced by the test harness, stop here: define lib, skip the boot flow.
