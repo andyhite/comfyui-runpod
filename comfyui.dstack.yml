@@ -75,14 +75,14 @@ resources:
   # ephemeral disk with no volume, so leave headroom for ComfyUI + outputs.
   disk: 200GB..
 
-# Auto-stop the pod if the GPU sits below 10% for a full hour — i.e. you
+# Auto-stop the pod if the GPU sits below 10% for a full 3 hours — i.e. you
 # finished generating and walked away. The base image won't stop itself
 # (ComfyUI is a server, and it stays alive even after a crash), so this is the
 # safety net against a forgotten pod billing all weekend. Enforced by the
 # in-container runner, so it works on RunPod (unlike fleet idle_duration).
 utilization_policy:
   min_gpu_utilization: 10
-  time_window: 1h
+  time_window: 3h
 
 # No `commands`: the custom image's entrypoint handles populate + snapshot
 # restore + workflow/config injection, then execs the base image's /start.sh.
