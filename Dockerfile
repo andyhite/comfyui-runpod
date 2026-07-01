@@ -35,11 +35,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends rclone \
 COPY pod/snapshot.json /opt/baked-snapshot.json
 RUN if python3.12 -c "import json,sys; d=json.load(open('/opt/baked-snapshot.json')); sys.exit(0 if (d.get('git_custom_nodes') or d.get('cnr_custom_nodes') or d.get('file_custom_nodes')) else 1)"; then \
       echo "Baking snapshot..."; \
-      COMFYUI_PATH=/opt/comfyui-baked \
-      PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu130 \
-      python3.12 \
-        /opt/comfyui-baked/custom_nodes/ComfyUI-Manager/cm-cli.py \
-        restore-snapshot /opt/baked-snapshot.json; \
+      export COMFYUI_PATH=/opt/comfyui-baked; \
+      export PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu130; \
+      CM=/opt/comfyui-baked/custom_nodes/ComfyUI-Manager/cm-cli.py; \
+      python3.12 "$CM" restore-snapshot /opt/baked-snapshot.json; \
+      python3.12 "$CM" restore-dependencies; \
     else echo "Snapshot empty — skipping bake (installs at boot instead)."; fi \
  && sha256sum /opt/baked-snapshot.json | cut -d' ' -f1 \
       > /opt/comfyui-baked/.dstack-applied-snapshot.sha

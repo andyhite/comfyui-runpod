@@ -58,9 +58,15 @@ MARKER="$COMFY_DIR/.dstack-applied-snapshot.sha"
 if [ -f "$SNAP" ]; then
   sum="$(sha256sum "$SNAP" | cut -d' ' -f1)"
   if [ "$(cat "$MARKER" 2>/dev/null || true)" != "$sum" ]; then
+    CM_CLI="$COMFY_DIR/custom_nodes/ComfyUI-Manager/cm-cli.py"
     log "restoring ComfyUI-Manager snapshot..."
-    if python3.12 "$COMFY_DIR/custom_nodes/ComfyUI-Manager/cm-cli.py" \
-         restore-snapshot "$SNAP"; then
+    if python3.12 "$CM_CLI" restore-snapshot "$SNAP"; then
+      # restore-snapshot re-clones the nodes but does NOT install their pip deps
+      # (e.g. Impact Pack -> scikit-image, WAS -> numba). restore-dependencies
+      # runs each installed node's requirements.txt (resolved via cu130 index).
+      log "installing node dependencies (restore-dependencies)..."
+      python3.12 "$CM_CLI" restore-dependencies \
+        || log "WARNING: some node deps failed to install — check the logs."
       echo "$sum" > "$MARKER"; log "snapshot restored."
     else
       log "WARNING: snapshot restore had errors — continuing so SSH/Jupyter come up."
