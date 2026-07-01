@@ -4,14 +4,12 @@
 # that, at boot, restores a ComfyUI-Manager snapshot and the R2-persisted user
 # dir (workflows / config), then hands off to the base image's /start.sh.
 #
-# HYBRID model:
-#   - Bake the snapshot below so cold starts skip clone/install for the stable set.
-#   - `files:` still ships the CURRENT pod/snapshot.json every `make up`; the
-#     entrypoint's restore-snapshot then applies only the DELTA since the bake.
-#   - When the delta grows enough to slow boots, `make image-build` to re-bake.
-#
-# The bake also writes the snapshot's checksum as the entrypoint's idempotency
-# marker, so an unchanged snapshot skips restore-snapshot entirely at boot.
+# Snapshot ownership lives in R2, not the image:
+#   - The entrypoint restores the ComfyUI-Manager snapshot from
+#     r2://$R2_BUCKET/snapshot.json at boot (delta over the base image nodes).
+#   - A background inotify watcher re-uploads a fresh snapshot to R2 whenever
+#     custom_nodes changes, so R2 stays current with no repo edit or rebuild.
+#   - This image only needs a rebuild when entrypoint.sh (or deps below) change.
 #
 # CUDA 13.0 base. Some nodes (e.g. comfyui-rmbg BodySegment) ship deps built
 # against the CUDA 13 runtime (libcudart.so.13), which only exists here. The
@@ -24,24 +22,10 @@ FROM runpod/comfyui:cuda13.0
 COPY entrypoint.sh /usr/local/bin/dstack-entry.sh
 RUN chmod +x /usr/local/bin/dstack-entry.sh
 
-# rclone — the entrypoint uses it for the R2 model cache + output persistence
-RUN apt-get update && apt-get install -y --no-install-recommends rclone \
+# rclone — R2 model cache + output/snapshot persistence.
+# inotify-tools — the entrypoint's custom_nodes snapshot watcher (inotifywait).
+RUN apt-get update && apt-get install -y --no-install-recommends rclone inotify-tools \
  && rm -rf /var/lib/apt/lists/*
 
-# --- Bake the snapshot (comment this block out to install purely at boot) -----
-# Harmless while pod/snapshot.json is empty (no-op); fill the snapshot, then
-# `make image-build` to actually bake your nodes in.
-COPY pod/snapshot.json /opt/baked-snapshot.json
-RUN if python3.12 -c "import json,sys; d=json.load(open('/opt/baked-snapshot.json')); sys.exit(0 if (d.get('git_custom_nodes') or d.get('cnr_custom_nodes') or d.get('file_custom_nodes')) else 1)"; then \
-      echo "Baking snapshot..."; \
-      export COMFYUI_PATH=/opt/comfyui-baked; \
-      export PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu130; \
-      CM=/opt/comfyui-baked/custom_nodes/ComfyUI-Manager/cm-cli.py; \
-      python3.12 "$CM" restore-snapshot /opt/baked-snapshot.json; \
-      python3.12 "$CM" restore-dependencies; \
-    else echo "Snapshot empty — skipping bake (installs at boot instead)."; fi \
- && sha256sum /opt/baked-snapshot.json | cut -d' ' -f1 \
-      > /opt/comfyui-baked/.dstack-applied-snapshot.sha
-# -----------------------------------------------------------------------------
 
 ENTRYPOINT ["/usr/local/bin/dstack-entry.sh"]
