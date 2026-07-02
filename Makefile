@@ -31,7 +31,9 @@ FLEET_FILE   ?= comfyui-fleet.dstack.yml
 R2_BUCKET    ?= comfyui
 
 .PHONY: help image-build server fleet up down logs attach ps status \
-        r2-bucket secrets-help
+        panel r2-bucket secrets-help
+
+COMFYUI_URL  ?= http://localhost:8188
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -63,6 +65,9 @@ ps: ## List runs
 
 status: ## Show detailed status for this run
 	dstack ps -v -n 1
+
+panel: ## Start the comfyui-mcp panel orchestrator (attaches to the running ComfyUI)
+	npx -y comfyui-mcp connect $(COMFYUI_URL)
 
 r2-bucket: ## Create the R2 bucket for the directory mirror (one-time)
 	npx -y wrangler@latest r2 bucket create $(R2_BUCKET)
