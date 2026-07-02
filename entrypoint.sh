@@ -156,11 +156,18 @@ start_r2_persistence() {
   restore_and_watch "$COMFY_DIR/user" user "$USER_INOTIFY_EXCLUDE" "${USER_RCLONE_EXCLUDES[@]}" \
     || log "user restore failed — skipping its watcher (protecting R2)"
 
-  # models + output: background restore -> gated watcher (stream in).
-  restore_and_watch "$COMFY_DIR/models" models "$GLOBAL_INOTIFY_EXCLUDE" "${GLOBAL_RCLONE_EXCLUDES[@]}" \
-    || log "models restore failed — skipping its watcher (protecting R2)" &
-  restore_and_watch "$COMFY_DIR/output" output "$GLOBAL_INOTIFY_EXCLUDE" "${GLOBAL_RCLONE_EXCLUDES[@]}" \
-    || log "output restore failed — skipping its watcher (protecting R2)" &
+  # models + output: background restore -> gated watcher (stream in), one at a
+  # time. Sequenced (not two parallel `&` jobs) because two concurrent rclone
+  # copies each running --transfers/--checkers 16 contend for R2 connections —
+  # observed stalling the models restore's last stragglers to near-0 B/s for
+  # minutes right as output's small batch was mid-transfer alongside it.
+  # Chained in one background job so ComfyUI startup still isn't blocked.
+  (
+    restore_and_watch "$COMFY_DIR/models" models "$GLOBAL_INOTIFY_EXCLUDE" "${GLOBAL_RCLONE_EXCLUDES[@]}" \
+      || log "models restore failed — skipping its watcher (protecting R2)"
+    restore_and_watch "$COMFY_DIR/output" output "$GLOBAL_INOTIFY_EXCLUDE" "${GLOBAL_RCLONE_EXCLUDES[@]}" \
+      || log "output restore failed — skipping its watcher (protecting R2)"
+  ) &
 }
 
 # When sourced by the test harness, stop here: define lib, skip the boot flow.
