@@ -18,9 +18,14 @@ FROM runpod/comfyui:cuda13.0
 COPY entrypoint.sh /usr/local/bin/dstack-entry.sh
 RUN chmod +x /usr/local/bin/dstack-entry.sh
 
-# rclone — R2 restore + the per-directory mirror.
+# rclone — R2 restore + the per-directory mirror. Installed from rclone's
+# official script, NOT apt: the distro package is old enough to not recognise
+# the `Cloudflare` S3 provider (added in rclone v1.59), so it logs
+# `provider "Cloudflare" not known` on every call and falls back to generic S3.
+# The upstream build also has saner multi-thread transfer defaults.
 # inotify-tools — the entrypoint's directory watchers (inotifywait).
-RUN apt-get update && apt-get install -y --no-install-recommends rclone inotify-tools \
+RUN apt-get update && apt-get install -y --no-install-recommends inotify-tools curl unzip ca-certificates \
+ && curl -fsSL https://rclone.org/install.sh | bash \
  && rm -rf /var/lib/apt/lists/*
 
 ENTRYPOINT ["/usr/local/bin/dstack-entry.sh"]

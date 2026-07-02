@@ -65,13 +65,27 @@ restore_dir() {
     return 0
   fi
   log "restoring $subpath from R2..."
-  rclone copy "r2:$R2_BUCKET/$subpath" "$local_dir" "$@"
+  # rclone's periodic --stats are logged at INFO by default, i.e. invisible at
+  # our default NOTICE level — --stats-log-level NOTICE surfaces them without
+  # also turning on -v's noisy per-file transfer lines.
+  #
+  # Tuned for many-small-file restores (quantized/sharded models). rclone's
+  # defaults — 4 concurrent --transfers, and multi-thread streaming only above
+  # the 256Mi cutoff — collapse to a few MiB/s on a pile of sub-cutoff files
+  # (each is single-stream, only 4 at a time, latency-bound). More transfers +
+  # checkers, a lower multi-thread cutoff, and --fast-list (one recursive
+  # listing instead of per-directory round-trips) keep throughput up. Big
+  # monolithic checkpoints still multi-thread and saturate the link as before.
+  rclone copy "r2:$R2_BUCKET/$subpath" "$local_dir" \
+    --transfers 16 --checkers 16 --multi-thread-cutoff 64Mi --fast-list \
+    --stats=20s --stats-one-line --stats-log-level NOTICE "$@"
 }
 
 # Mirror a directory up to R2 (destructive exact copy).
 sync_up() {
   local local_dir="$1" subpath="$2"; shift 2
-  rclone sync "$local_dir" "r2:$R2_BUCKET/$subpath" "$@"
+  rclone sync "$local_dir" "r2:$R2_BUCKET/$subpath" \
+    --stats=20s --stats-one-line --stats-log-level NOTICE "$@"
 }
 
 # Watch a directory and sync_up on each debounced burst. Runs until the pod stops.
@@ -111,13 +125,16 @@ install_node_deps() {
   local cm_cli="$COMFY_DIR/custom_nodes/ComfyUI-Manager/cm-cli.py" np
   if [ -f "$cm_cli" ]; then
     log "installing node dependencies (cm-cli restore-dependencies)..."
-    python3.12 "$cm_cli" restore-dependencies \
+    # -u: unbuffered stdout/stderr. Without it, cm-cli's pip-install chatter
+    # sits in Python's block-buffered pipe and only appears (if at all) as one
+    # dump at process exit, since stdout isn't a tty here.
+    python3.12 -u "$cm_cli" restore-dependencies \
       || log "WARNING: some node deps failed to install — check the logs."
   fi
   for np in "$COMFY_DIR"/custom_nodes/*/; do
     if [ -f "${np}install.py" ]; then
       log "running install.py for $(basename "$np")..."
-      ( cd "$np" && python3.12 install.py ) \
+      ( cd "$np" && python3.12 -u install.py ) \
         || log "WARNING: install.py failed for $(basename "$np")"
     fi
   done
