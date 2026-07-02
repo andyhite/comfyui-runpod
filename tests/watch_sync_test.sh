@@ -61,6 +61,7 @@ export ENTRYPOINT_LIB_ONLY=1
 . "$ROOT/entrypoint.sh"
 R2_BUCKET="testbucket"
 DEBOUNCE=1
+export RESTORE_POLL_EVERY=1 RESTORE_RETRY_BACKOFF=0
 mkdir -p "$WORK/dir"
 
 # --- restore_dir: fail mode --------------------------------------------------

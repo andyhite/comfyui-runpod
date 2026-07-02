@@ -42,6 +42,64 @@ USER_RCLONE_EXCLUDES=("${GLOBAL_RCLONE_EXCLUDES[@]}" --exclude '__manager/cache/
 GLOBAL_INOTIFY_EXCLUDE='(/\.venv/|/venv/|/__pycache__/|\.pyc$|\.part|\.tmp$|\.log$|comfyui\.db)'
 USER_INOTIFY_EXCLUDE='(/\.venv/|/venv/|/__pycache__/|\.pyc$|\.part|\.tmp$|\.log$|comfyui\.db|/__manager/cache/)'
 
+# Run `rclone copy` guarded against a stalled transfer: if it makes no
+# forward progress (bytes transferred, polled via rclone's rc API) for
+# STALL_AFTER seconds, kill it and retry. Covers a single file's multi-thread
+# chunk hitting a badly degraded connection while the rest of the transfer is
+# fine — observed once taking 40+ minutes on a ~14GB file whose identically
+# sized sibling, started at the same moment, finished in under 4. rclone has
+# no "minimum speed" abort flag, and a true idle-connection --timeout doesn't
+# fire here since the stalled chunk still trickles a few bytes rather than
+# going fully silent. rclone copy is safe to kill and rerun: local
+# destinations write to a temp file and atomically rename on success, so a
+# retry only redoes whatever didn't finish.
+rclone_copy_stall_guarded() {
+  local src="$1" dst="$2"; shift 2
+  local max_attempts="${RESTORE_MAX_ATTEMPTS:-3}" stall_after="${RESTORE_STALL_AFTER:-360}" \
+        poll_every="${RESTORE_POLL_EVERY:-30}" retry_backoff="${RESTORE_RETRY_BACKOFF:-10}"
+  local attempt port pid bytes last_bytes stalled rc waited
+  for attempt in $(seq 1 "$max_attempts"); do
+    # Random port per attempt: avoids racing the OS over releasing the
+    # previous attempt's port right after killing it.
+    port=$((20000 + RANDOM % 20000))
+    rclone copy "$src" "$dst" --rc --rc-addr "127.0.0.1:$port" --rc-no-auth "$@" &
+    pid=$!
+    last_bytes=-1 stalled=0
+    while kill -0 "$pid" 2>/dev/null; do
+      # Poll for exit every 1s (not a blind sleep poll_every) so a process
+      # that finishes mid-interval is noticed promptly instead of up to
+      # poll_every seconds late.
+      waited=0
+      while [ "$waited" -lt "$poll_every" ] && kill -0 "$pid" 2>/dev/null; do
+        sleep 1
+        waited=$((waited + 1))
+      done
+      kill -0 "$pid" 2>/dev/null || break
+      bytes="$(curl -s -m 5 -X POST "http://127.0.0.1:$port/core/stats" 2>/dev/null \
+        | grep -o '"bytes":[0-9]*' | head -1 | cut -d: -f2)"
+      [ -z "$bytes" ] && continue
+      if [ "$bytes" = "$last_bytes" ]; then
+        stalled=$((stalled + poll_every))
+      else
+        stalled=0; last_bytes="$bytes"
+      fi
+      if [ "$stalled" -ge "$stall_after" ]; then
+        log "rclone copy to $dst stalled ${stall_after}s at $bytes bytes (attempt $attempt/$max_attempts) — killing and retrying"
+        kill -TERM "$pid" 2>/dev/null
+        sleep 5
+        kill -KILL "$pid" 2>/dev/null
+        break
+      fi
+    done
+    wait "$pid"
+    rc=$?
+    [ "$rc" -eq 0 ] && return 0
+    log "rclone copy to $dst exited $rc (attempt $attempt/$max_attempts)"
+    [ "$attempt" -lt "$max_attempts" ] && sleep "$retry_backoff"
+  done
+  return 1
+}
+
 # Restore a directory from R2. An empty/absent R2 path is a valid FRESH state
 # (return 0 so the watcher starts and seeds it). An lsf failure means R2 is
 # unreachable/misconfigured (return 1 — do NOT let a watcher start). A partial
@@ -76,7 +134,7 @@ restore_dir() {
   # checkers, a lower multi-thread cutoff, and --fast-list (one recursive
   # listing instead of per-directory round-trips) keep throughput up. Big
   # monolithic checkpoints still multi-thread and saturate the link as before.
-  rclone copy "r2:$R2_BUCKET/$subpath" "$local_dir" \
+  rclone_copy_stall_guarded "r2:$R2_BUCKET/$subpath" "$local_dir" \
     --transfers 16 --checkers 16 --multi-thread-cutoff 64Mi --fast-list \
     --stats=20s --stats-one-line --stats-log-level NOTICE "$@"
 }
