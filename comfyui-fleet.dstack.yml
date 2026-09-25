@@ -16,11 +16,20 @@ nodes: 0..1
 idle_duration: 1h
 
 resources:
-  # Match the task: only architectures with the R580+/CUDA-13 driver
-  # (Ada / Hopper / Blackwell — no Ampere), 24GB+ for WAN 14B.
+  # Superset of both task modes' gpu specs (comfyui.dstack.yml pins RTX5090;
+  # comfyui-cheap.dstack.yml floats across the whole Blackwell menu) — the
+  # CUDA-13 image wants an R580+ host driver, which on RunPod means a
+  # Blackwell host. Keep this list/memory floor in sync with whichever task
+  # file has the loosest spec (currently comfyui-cheap.dstack.yml).
+  #
+  # Narrowing THIS file alone is not enough: a run provisions into any fleet in
+  # the project whose spec can satisfy it, and the `ollama` fleet's looser
+  # "gpu: 24GB.." spec is what kept handing us an RTXPRO4000. Each task's own
+  # name list is the binding filter per run; this fleet spec just has to be
+  # able to satisfy either.
   gpu:
-    name: [L40, L40S, RTX4090, RTX5090, RTXPRO4000, RTXPRO4500, RTXPRO6000, H100, H100NVL, H200, B200]
+    name: [RTXPRO4000, RTXPRO4500, RTX5090]
     memory: 24GB..
   # ~100GB of fp16 models download to ephemeral disk each boot (no volume),
-  # plus image + ComfyUI + outputs — must match the task's disk requirement.
+  # plus image + ComfyUI + outputs — must match the tasks' disk requirement.
   disk: 200GB..

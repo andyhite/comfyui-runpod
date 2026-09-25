@@ -6,7 +6,7 @@
 #   1. CUDA-13 preflight (exit non-zero on an old-driver host so dstack retries)
 #   2. populate ComfyUI from the baked copy if the disk is fresh
 #   3. restore custom_nodes + user from R2 (blocking), then install node deps
-#   4. restore models + output from R2 in the background (ComfyUI comes up first)
+#   4. restore input + models + output from R2 in the background (ComfyUI first)
 #   5. start a filesystem-watcher per dir that rclone-syncs it back to R2, so R2
 #      stays an EXACT mirror. Each watcher starts only after its restore succeeds.
 # then hand off to /start.sh, which creates the venv and launches ComfyUI, SSH,
@@ -23,9 +23,10 @@ export COMFYUI_PATH="$COMFY_DIR"
 log() { echo "[dstack-entry] $*"; }
 
 # ---------------------------------------------------------------------------
-# R2 mirror library. R2 is an exact copy of four dirs: custom_nodes, user,
-# models, output. Restore (R2->pod) uses `copy` (non-destructive); the running
-# mirror (pod->R2) uses `sync` (destructive — deletions/renames propagate).
+# R2 mirror library. R2 is an exact copy of five dirs: custom_nodes, user,
+# models, input, output. Restore (R2->pod) uses `copy` (non-destructive); the
+# running mirror (pod->R2) uses `sync` (destructive — deletions/renames
+# propagate).
 # A dir's up-sync watcher starts ONLY after its restore succeeds, so a degraded
 # pod can never wipe good data in R2.
 # ---------------------------------------------------------------------------
@@ -198,9 +199,9 @@ install_node_deps() {
   done
 }
 
-# Restore + mirror all four dirs. Blocking for custom_nodes + user (small,
-# required for a correct launch); backgrounded for models + output (large —
-# ComfyUI comes up while they stream). Each watcher is gated on its restore.
+# Restore + mirror all five dirs. Blocking for custom_nodes + user (small,
+# required for a correct launch); backgrounded for input + models + output
+# (ComfyUI comes up while they stream). Each watcher is gated on its restore.
 start_r2_persistence() {
   # custom_nodes: restore -> install deps -> gated watcher.
   if restore_dir "$COMFY_DIR/custom_nodes" custom_nodes "${GLOBAL_RCLONE_EXCLUDES[@]}"; then
@@ -214,13 +215,18 @@ start_r2_persistence() {
   restore_and_watch "$COMFY_DIR/user" user "$USER_INOTIFY_EXCLUDE" "${USER_RCLONE_EXCLUDES[@]}" \
     || log "user restore failed — skipping its watcher (protecting R2)"
 
-  # models + output: background restore -> gated watcher (stream in), one at a
-  # time. Sequenced (not two parallel `&` jobs) because two concurrent rclone
-  # copies each running --transfers/--checkers 16 contend for R2 connections —
-  # observed stalling the models restore's last stragglers to near-0 B/s for
-  # minutes right as output's small batch was mid-transfer alongside it.
-  # Chained in one background job so ComfyUI startup still isn't blocked.
+  # input + models + output: background restore -> gated watcher (stream in),
+  # one at a time. Sequenced (not parallel `&` jobs) because two concurrent
+  # rclone copies each running --transfers/--checkers 16 contend for R2
+  # connections — observed stalling the models restore's last stragglers to
+  # near-0 B/s for minutes right as output's small batch was mid-transfer
+  # alongside it. Chained in one background job so ComfyUI startup still isn't
+  # blocked. `input` goes first in the chain: it's small, and a workflow queued
+  # right after boot needs its source images, so it must not wait behind a
+  # models restore measured in tens of GB.
   (
+    restore_and_watch "$COMFY_DIR/input" input "$GLOBAL_INOTIFY_EXCLUDE" "${GLOBAL_RCLONE_EXCLUDES[@]}" \
+      || log "input restore failed — skipping its watcher (protecting R2)"
     restore_and_watch "$COMFY_DIR/models" models "$GLOBAL_INOTIFY_EXCLUDE" "${GLOBAL_RCLONE_EXCLUDES[@]}" \
       || log "models restore failed — skipping its watcher (protecting R2)"
     restore_and_watch "$COMFY_DIR/output" output "$GLOBAL_INOTIFY_EXCLUDE" "${GLOBAL_RCLONE_EXCLUDES[@]}" \
@@ -267,6 +273,31 @@ fi
 # in the background. Skipped entirely when R2 isn't configured.
 if [ "$R2" = 1 ]; then
   start_r2_persistence
+fi
+
+# Pin ComfyUI to a loopback bind. /start.sh hardcodes `--listen 0.0.0.0`, then
+# appends whatever this args file holds — and argparse takes the LAST --listen,
+# so the file is the supported way to override it without touching the base image.
+#
+# Why: ComfyUI-Manager (v3.38+) gates every install whose source isn't in the
+# default channel — git URLs, nightly versions, unregistered packs — behind
+# `flag AND is_loopback(args.listen)` (glob/manager_server.py:88-97, called at
+# :1415 and :1477). The loopback term is NOT configurable: under `--listen
+# 0.0.0.0` those installs return 404 regardless of security_level or
+# allow_git_url_install, and the UI reports 'With the current security level
+# configuration, only custom nodes from the "default channel" can be installed'.
+# Loopback also flips Manager's is_local_mode, which is the posture Manager
+# assumes for a pod reached through a tunnel instead of an exposed port.
+#
+# Access is unchanged: dstack forwards with `ssh -L localhost:8188:localhost:8188`,
+# so the tunnel's far end connects to 127.0.0.1 inside the pod. The RunPod HTTP
+# proxy (https://<pod>-8188.proxy.runpod.net) does NOT reach a loopback bind —
+# use `make up` / `make attach` and http://localhost:8188.
+COMFY_ARGS_FILE=/workspace/runpod-slim/comfyui_args.txt
+mkdir -p "$(dirname "$COMFY_ARGS_FILE")"
+if ! grep -qx -- '--listen 127.0.0.1' "$COMFY_ARGS_FILE" 2>/dev/null; then
+  printf '%s\n' '--listen 127.0.0.1' >> "$COMFY_ARGS_FILE"
+  log "pinned ComfyUI to 127.0.0.1 via $COMFY_ARGS_FILE (Manager's non-default-channel install gate)"
 fi
 
 log "handing off to /start.sh"

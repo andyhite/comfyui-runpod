@@ -144,11 +144,20 @@ install_node_deps() { echo "install_node_deps" >> "$ORCH_LOG"; }
 : > "$ORCH_LOG"; unset FAIL_SUBPATH
 start_r2_persistence; wait
 for want in "restore custom_nodes" "install_node_deps" "watch custom_nodes" \
-            "restore user" "watch user" "restore models" "watch models" \
+            "restore user" "watch user" "restore input" "watch input" \
+            "restore models" "watch models" \
             "restore output" "watch output"; do
   grep -qx "$want" "$ORCH_LOG" || fail "start_r2_persistence missing: $want"
 done
-pass "start_r2_persistence restores + watches all four dirs and installs deps"
+pass "start_r2_persistence restores + watches all five dirs and installs deps"
+
+# input must stream ahead of models: it's small, and a workflow queued right
+# after boot needs its source images rather than waiting out a tens-of-GB
+# models restore.
+[ "$(grep -nx "restore input" "$ORCH_LOG" | cut -d: -f1)" \
+  -lt "$(grep -nx "restore models" "$ORCH_LOG" | cut -d: -f1)" ] \
+  || fail "input restore must be sequenced before models"
+pass "start_r2_persistence sequences the input restore ahead of models"
 
 # user restore fails: user watcher must NOT start; others unaffected.
 : > "$ORCH_LOG"; export FAIL_SUBPATH=user

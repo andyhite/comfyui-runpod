@@ -6,11 +6,11 @@ name: comfyui
 # GHCR, either make the package public or add `registry_auth:` here.
 image: ghcr.io/andyhite/comfyui-runpod:latest
 
-# Region-agnostic: no network volume, so dstack picks the cheapest 24-48GB
-# GPU anywhere on RunPod, on-demand, under $1.20/hr.
+# Region-agnostic: no network volume, so dstack picks the cheapest matching
+# GPU anywhere on RunPod, on-demand, under $1.50/hr (RTX 5090 is $0.99 today).
 backends: [runpod]
 spot_policy: on-demand
-max_price: 1.20
+max_price: 1.50
 
 # Retry on a different host if provisioning fails OR the entrypoint's CUDA
 # preflight exits non-zero (old-driver host). dstack can't filter by driver, so
@@ -20,7 +20,7 @@ retry:
   duration: 1h
 
 # Nothing is uploaded to the pod anymore: models, custom nodes, the user dir,
-# and outputs all live in R2 and are restored at boot by the image entrypoint.
+# inputs, and outputs all live in R2 and are restored at boot by the entrypoint.
 # (Set the R2 secrets below to enable that.)
 
 # Secrets (set once with `dstack secret set <NAME> <value>`) — keeps account-
@@ -31,8 +31,8 @@ retry:
 #   R2_ACCOUNT_ID         your Cloudflare account id (for the R2 endpoint)
 #   R2_ACCESS_KEY_ID      from a Cloudflare R2 API token (Object Read & Write)
 #   R2_SECRET_ACCESS_KEY  ditto
-# The R2 secrets enable persistence for ALL four mirrored dirs (custom_nodes,
-# user, models, output). Omit them and the pod still runs, but with NO
+# The R2 secrets enable persistence for ALL five mirrored dirs (custom_nodes,
+# user, models, input, output). Omit them and the pod still runs, but with NO
 # persistence — nothing is restored at boot and nothing is mirrored back.
 env:
   - HF_TOKEN=${{ secrets.HF_TOKEN }}
@@ -60,15 +60,19 @@ ports:
   - 8080
 
 resources:
-  # Whitelist only the architectures RunPod ships with the R580+ (CUDA 13)
-  # driver: Ada Lovelace, Hopper, Blackwell. NOT Ampere (A40/A100/A5000/RTX3090)
-  # — those stay on older drivers and would fail the CUDA preflight. dstack can't
-  # filter by driver, so the preflight + retry below catch any stragglers.
-  # max_price keeps the affordable ones (L4, RTXPRO4000/4500, RTX5090); the
-  # H100/H200/B200/RTXPRO6000 entries are only used if you raise max_price.
+  # Blackwell only — the CUDA-13 image needs an R580+ host driver, and on RunPod
+  # that in practice means a Blackwell host. Of the Blackwell cards offered
+  # under the cap, this is the whole menu (live `dstack offer`, 200GB disk):
+  #   RTXPRO4000   24GB  $0.57   <- what we kept landing on: slowest of the four
+  #   RTXPRO4500   32GB  $0.72   ~1.3x the 4000
+  #   RTX5090      32GB  $0.99   ~3x the 4000, 1792GB/s, nvfp4 for Krea 2 quants
+  #   RTXPRO6000 / B200       -  above $1.50, so never offered here
+  # dstack always takes the CHEAPEST match, so the name list is the only knob
+  # that picks a card: adding RTXPRO4500 back means always getting a 4500, not
+  # a 5090. Keep this list and the fleet's (comfyui-fleet.dstack.yml) identical.
   gpu:
-    name: [L40, L40S, RTX4090, RTX5090, RTXPRO4000, RTXPRO4500, RTXPRO6000, H100, H100NVL, H200, B200]
-    memory: 24GB..
+    name: [RTX5090]
+    memory: 32GB..
   # ~100GB of fp16 models (WAN 14B hi/lo + Klein 9B + encoders) live on
   # ephemeral disk with no volume, so leave headroom for ComfyUI + outputs.
   disk: 200GB..
@@ -85,9 +89,9 @@ max_duration: 12h
 #   time_window: 1h
 
 # No `commands`: the custom image's entrypoint restores custom_nodes + user from
-# R2 (blocking), installs node deps, streams models + output from R2 in the
-# background, starts a watcher per dir that mirrors it back to R2, then execs the
-# base image's /start.sh.
+# R2 (blocking), installs node deps, streams input + models + output from R2 in
+# the background, starts a watcher per dir that mirrors it back to R2, then
+# execs the base image's /start.sh.
 #
 # Persistence is via R2 (see env above): R2 is an exact mirror of
-# custom_nodes/, user/, models/, and output/.
+# custom_nodes/, user/, models/, input/, and output/.

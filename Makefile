@@ -1,27 +1,37 @@
 # ComfyUI on RunPod via dstack
 #
 # First-time setup:
-#   make image-build     # build & push the custom image (once; and when entrypoint.sh changes)
+#   make image-build     # build & push the custom image (once; and when entrypoint.sh or the ComfyUI pin changes)
 #   make server          # terminal 1 — leave running
 #   make fleet           # register the instance pool (once)
-#   make up              # provision the pod + attach
+#   make up              # provision the pod + attach (RTX5090, fast/pricier)
+#   make up-cheap        # ...or provision on whatever Blackwell GPU is cheapest
 #   open http://localhost:8188   (ComfyUI; also 8888 Jupyter, 8080 FileBrowser)
 #   make down            # tear the pod down when finished
 #
 # Day-to-day: install models/nodes on the running pod (ComfyUI-Manager). They
-# mirror to R2 automatically; workflows + config + outputs persist to R2 too. An
-# image rebuild is only needed when entrypoint.sh changes.
+# mirror to R2 automatically; workflows + config + inputs + outputs persist to
+# R2 too. An image rebuild is only needed when entrypoint.sh or the ComfyUI pin
+# changes.
 
 # Custom image (must match `image:` in comfyui.dstack.yml). RunPod is x86_64.
 IMAGE        ?= ghcr.io/andyhite/comfyui-runpod
 TAG          ?= latest
 PLATFORM     ?= linux/amd64
 
+# ComfyUI release to bake in. Empty = the Dockerfile's `ARG COMFYUI_VERSION`
+# default, which is the one place the current pin lives.
+COMFYUI_VERSION ?=
+BUILD_ARGS   := $(if $(COMFYUI_VERSION),--build-arg COMFYUI_VERSION=$(COMFYUI_VERSION))
+
 # dstack control-plane server (port default avoids the common 3000 clash).
 DSTACK_PORT  ?= 3333
 UPLOAD_LIMIT ?= 104857600  # 100 MB (dstack code-upload cap; no payload is uploaded now)
 
-# Run/fleet/config names and files.
+# Run/fleet/config names and files. TASK_FILE picks the launch mode:
+#   comfyui.dstack.yml       (default) pinned to RTX5090 — fastest, ~$0.99/hr
+#   comfyui-cheap.dstack.yml floats across the Blackwell menu, cheapest wins
+#                            (usually RTXPRO4000, ~$0.57/hr, slower)
 RUN          ?= comfyui
 TASK_FILE    ?= comfyui.dstack.yml
 FLEET_FILE   ?= comfyui-fleet.dstack.yml
@@ -30,7 +40,7 @@ FLEET_FILE   ?= comfyui-fleet.dstack.yml
 
 R2_BUCKET    ?= comfyui
 
-.PHONY: help image-build server fleet up down logs attach ps status \
+.PHONY: help image-build server fleet up up-cheap down logs attach ps status \
         panel r2-bucket secrets-help
 
 COMFYUI_URL  ?= http://localhost:8188
@@ -39,8 +49,8 @@ help: ## Show this help
 	@grep -hE '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) \
 		| awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 
-image-build: ## Build & push the custom image for linux/amd64 (needs `docker login ghcr.io`)
-	docker buildx build --platform $(PLATFORM) -t $(IMAGE):$(TAG) --push .
+image-build: ## Build & push the custom image for linux/amd64 (`docker login ghcr.io` first; COMFYUI_VERSION=vX.Y.Z repins ComfyUI)
+	docker buildx build --platform $(PLATFORM) $(BUILD_ARGS) -t $(IMAGE):$(TAG) --push .
 
 server: ## Start the dstack server (foreground; leave running). Override: make server DSTACK_PORT=3333
 	DSTACK_SERVER_CODE_UPLOAD_LIMIT=$(UPLOAD_LIMIT) dstack server --port $(DSTACK_PORT)
@@ -48,8 +58,11 @@ server: ## Start the dstack server (foreground; leave running). Override: make s
 fleet: ## Register/refresh the instance pool (one-time; re-run after editing the fleet)
 	dstack apply -y -f $(FLEET_FILE)
 
-up: ## Provision the pod + attach
+up: ## Provision the pod on the pinned RTX5090 (fast, ~$0.99/hr). Override file: make up TASK_FILE=...
 	dstack apply -y -f $(TASK_FILE)
+
+up-cheap: ## Provision the pod on whichever Blackwell GPU is cheapest right now (usually RTXPRO4000, ~$0.57/hr, slower)
+	dstack apply -y -f comfyui-cheap.dstack.yml
 
 down: ## Stop and tear down the pod
 	dstack stop -y $(RUN)
