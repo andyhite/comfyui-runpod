@@ -11,6 +11,7 @@ name: comfyui
 image: ghcr.io/andyhite/comfyui-runpod:latest
 
 backends: [runpod]
+fleets: [comfyui]
 spot_policy: on-demand
 max_price: 1.50
 
@@ -42,10 +43,11 @@ resources:
   #   RTXPRO4000   24GB  $0.57   <- normally wins this mode
   #   RTXPRO4500   32GB  $0.72
   #   RTX5090      32GB  $0.99
+  #   RTXPRO5000   48GB  unlisted (no offers seen yet; price unconfirmed)
   #   RTXPRO6000 / B200       -  above $1.50, so never offered here
   # Must stay a superset of comfyui-fleet.dstack.yml's gpu spec.
   gpu:
-    name: [RTXPRO4000, RTXPRO4500, RTX5090]
+    name: [RTXPRO4000, RTXPRO4500, RTX5090, RTXPRO5000]
     memory: 24GB..
   disk: 200GB..
 

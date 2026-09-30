@@ -22,13 +22,12 @@ resources:
   # Blackwell host. Keep this list/memory floor in sync with whichever task
   # file has the loosest spec (currently comfyui-cheap.dstack.yml).
   #
-  # Narrowing THIS file alone is not enough: a run provisions into any fleet in
-  # the project whose spec can satisfy it, and the `ollama` fleet's looser
-  # "gpu: 24GB.." spec is what kept handing us an RTXPRO4000. Each task's own
-  # name list is the binding filter per run; this fleet spec just has to be
-  # able to satisfy either.
+  # Both task files set `fleets: [comfyui]`, so they only provision into this
+  # fleet (not the looser `ollama` one, which used to hand us an RTXPRO4000).
+  # Each task's own name list is the binding filter per run; this fleet spec
+  # just has to be able to satisfy either.
   gpu:
-    name: [RTXPRO4000, RTXPRO4500, RTX5090]
+    name: [RTXPRO4000, RTXPRO4500, RTX5090, RTXPRO5000]
     memory: 24GB..
   # ~100GB of fp16 models download to ephemeral disk each boot (no volume),
   # plus image + ComfyUI + outputs — must match the tasks' disk requirement.

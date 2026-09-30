@@ -1,0 +1,143 @@
+{
+  "comfyui_version": "0.36.0",
+  "packs": {
+    "Civicomfy": {
+      "ver": "a1d46858ede59aad39f95be3ee7c3f78a54ec9aa",
+      "cnr_id": "civicomfy",
+      "aux_id": "MoonGoblinDev/Civicomfy",
+      "enabled": true
+    },
+    "ComfyUI-Crystools": {
+      "ver": "1.27.4",
+      "cnr_id": "comfyui-crystools",
+      "aux_id": null,
+      "enabled": true
+    },
+    "ComfyUI-Flux2Klein-Enhancer": {
+      "ver": "3.4.4",
+      "cnr_id": "comfyui-flux2klein-enhancer",
+      "aux_id": null,
+      "enabled": true
+    },
+    "ComfyUI-KJNodes": {
+      "ver": "c2a47f161bdcecc1e6baf3412f1d116febc26ce3",
+      "cnr_id": "comfyui-kjnodes",
+      "aux_id": "kijai/ComfyUI-KJNodes",
+      "enabled": true
+    },
+    "ComfyUI-Krea2T-Enhancer": {
+      "ver": "1.3.0",
+      "cnr_id": "comfyui-krea2t-enhancer",
+      "aux_id": null,
+      "enabled": true
+    },
+    "ComfyUI-Manager": {
+      "ver": "7c725c1d423cf9a674201969c41fd4aa5bad718b",
+      "cnr_id": "comfyui-manager",
+      "aux_id": "ltdrdata/ComfyUI-Manager",
+      "enabled": true
+    },
+    "ComfyUI-RunpodDirect": {
+      "ver": "19224c9e29d5705e89ca2ec6ed558e292a1a6afe",
+      "cnr_id": "comfyui-runpoddirect",
+      "aux_id": "MadiatorLabs/ComfyUI-RunpodDirect",
+      "enabled": true
+    },
+    "Comfyui-PainterFLF2V": {
+      "ver": "c81a68feceb90b28557a979d6de44eac59c89123",
+      "cnr_id": "",
+      "aux_id": "princepainter/Comfyui-PainterFLF2V",
+      "enabled": true
+    },
+    "bjornulf_custom_nodes": {
+      "ver": "1.1.8",
+      "cnr_id": "bjornulf_custom_nodes",
+      "aux_id": null,
+      "enabled": true
+    },
+    "comfyui-andypack": {
+      "ver": "291e171c1bdeacf584983587e35405829864ce52",
+      "cnr_id": "",
+      "aux_id": "andyhite/comfyui-andypack",
+      "enabled": true
+    },
+    "comfyui-auto-nodes-layout": {
+      "ver": "0.0.3",
+      "cnr_id": "comfyui-auto-nodes-layout",
+      "aux_id": null,
+      "enabled": true
+    },
+    "comfyui-easy-use": {
+      "ver": "1.3.6",
+      "cnr_id": "comfyui-easy-use",
+      "aux_id": null,
+      "enabled": true
+    },
+    "comfyui-image-picker": {
+      "ver": "1.2.0",
+      "cnr_id": "comfyui-image-picker",
+      "aux_id": null,
+      "enabled": true
+    },
+    "comfyui-impact-pack": {
+      "ver": "8.28.3",
+      "cnr_id": "comfyui-impact-pack",
+      "aux_id": null,
+      "enabled": true
+    },
+    "comfyui-krea2-conditioning": {
+      "ver": "1.0.2",
+      "cnr_id": "comfyui-krea2-conditioning",
+      "aux_id": null,
+      "enabled": true
+    },
+    "comfyui-krea2edit": {
+      "ver": "86f886dac23013d88996e3a2e99093ba44d322fb",
+      "cnr_id": "comfyui-krea2edit",
+      "aux_id": "lbouaraba/comfyui-krea2edit",
+      "enabled": true
+    },
+    "comfyui-krea2edit@1_2_3": {
+      "ver": "1.2.3",
+      "cnr_id": "comfyui-krea2edit",
+      "aux_id": null,
+      "enabled": false
+    },
+    "comfyui-mcp-panel": {
+      "ver": "0c7b8747d26b52ab60539829ecd31e0d7378cef6",
+      "cnr_id": "comfyui-agent-panel",
+      "aux_id": "artokun/comfyui-mcp-panel",
+      "enabled": true
+    },
+    "comfyui-rmbg": {
+      "ver": "3.0.0",
+      "cnr_id": "comfyui-rmbg",
+      "aux_id": null,
+      "enabled": true
+    },
+    "comfyui-videohelpersuite": {
+      "ver": "1.7.9",
+      "cnr_id": "comfyui-videohelpersuite",
+      "aux_id": null,
+      "enabled": true
+    },
+    "comfyui_fill-nodes": {
+      "ver": "2.28.6",
+      "cnr_id": "comfyui_fill-nodes",
+      "aux_id": null,
+      "enabled": true
+    },
+    "h3-reference-library": {
+      "ver": "1.0.0",
+      "cnr_id": "h3-reference-library",
+      "aux_id": null,
+      "enabled": true
+    },
+    "was-ns": {
+      "ver": "3.0.1",
+      "cnr_id": "was-ns",
+      "aux_id": null,
+      "enabled": true
+    }
+  }
+}

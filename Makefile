@@ -41,7 +41,7 @@ FLEET_FILE   ?= comfyui-fleet.dstack.yml
 R2_BUCKET    ?= comfyui
 
 .PHONY: help image-build server fleet up up-cheap down logs attach ps status \
-        panel r2-bucket secrets-help
+        panel nodes-lock nodes-check r2-bucket secrets-help
 
 COMFYUI_URL  ?= http://localhost:8188
 
@@ -81,6 +81,12 @@ status: ## Show detailed status for this run
 
 panel: ## Start the comfyui-mcp panel orchestrator (attaches to the running ComfyUI)
 	npx -y comfyui-mcp connect $(COMFYUI_URL)
+
+nodes-lock: ## Record the pod's custom-node pack versions in custom-nodes.lock.json (commit it after installing/updating nodes)
+	python3 scripts/nodes-lock.py write $(COMFYUI_URL)
+
+nodes-check: ## Fail if the pod's custom-node packs or ComfyUI version drifted from custom-nodes.lock.json
+	python3 scripts/nodes-lock.py check $(COMFYUI_URL)
 
 r2-bucket: ## Create the R2 bucket for the directory mirror (one-time)
 	npx -y wrangler@latest r2 bucket create $(R2_BUCKET)

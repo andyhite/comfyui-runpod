@@ -45,6 +45,23 @@ make down          # tear down
 Install models and nodes on the running pod (ComfyUI-Manager); they mirror to
 R2 automatically.
 
+### Custom-node lock
+
+A node update changes every graph that uses the node, and R2 mirrors
+whatever the pod has, so `custom-nodes.lock.json` records the pod's packs
+(ComfyUI-Manager's `ver` — registry semver or git commit — plus source and
+enabled state) and its ComfyUI version.
+
+```bash
+make nodes-check   # exit 1 + one line per difference if the pod drifted from the lock
+make nodes-lock    # after a deliberate install/update: rewrite the lock, then commit it
+```
+
+Both read the pod through the tunnel (`COMFYUI_URL`, default
+`http://localhost:8188`). Brainforge pins the packs its own workflows use in
+each workflow descriptor and reports drift in `brainforge provider doctor
+comfyui`; this lock covers every pack on the pod.
+
 ## Trade-offs & Persistence
 
 - **Models** — R2 is the sole source; there's no manifest. A first-ever boot
@@ -86,3 +103,4 @@ R2 automatically.
 | `comfyui-cheap.dstack.yml` | the run (task), cheapest-Blackwell mode — same as above minus the GPU pin |
 | `comfyui-fleet.dstack.yml` | the instance pool |
 | `Makefile` | commands |
+| `custom-nodes.lock.json`, `scripts/nodes-lock.py` | custom-node lock and its `make nodes-lock` / `make nodes-check` tool |

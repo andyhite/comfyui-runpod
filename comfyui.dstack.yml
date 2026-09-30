@@ -9,6 +9,9 @@ image: ghcr.io/andyhite/comfyui-runpod:latest
 # Region-agnostic: no network volume, so dstack picks the cheapest matching
 # GPU anywhere on RunPod, on-demand, under $1.50/hr (RTX 5090 is $0.99 today).
 backends: [runpod]
+# Only provision into this repo's fleet; otherwise dstack may use any fleet in
+# the project that fits (e.g. the looser `ollama` fleet).
+fleets: [comfyui]
 spot_policy: on-demand
 max_price: 1.50
 
@@ -66,12 +69,14 @@ resources:
   #   RTXPRO4000   24GB  $0.57   <- what we kept landing on: slowest of the four
   #   RTXPRO4500   32GB  $0.72   ~1.3x the 4000
   #   RTX5090      32GB  $0.99   ~3x the 4000, 1792GB/s, nvfp4 for Krea 2 quants
+  #   RTXPRO5000   48GB  unlisted  fallback when no 5090 is available; no
+  #                      offers seen yet, price unconfirmed (expected ~$1-1.5)
   #   RTXPRO6000 / B200       -  above $1.50, so never offered here
   # dstack always takes the CHEAPEST match, so the name list is the only knob
   # that picks a card: adding RTXPRO4500 back means always getting a 4500, not
   # a 5090. Keep this list and the fleet's (comfyui-fleet.dstack.yml) identical.
   gpu:
-    name: [RTX5090]
+    name: [RTX5090, RTXPRO5000]
     memory: 32GB..
   # ~100GB of fp16 models (WAN 14B hi/lo + Klein 9B + encoders) live on
   # ephemeral disk with no volume, so leave headroom for ComfyUI + outputs.
