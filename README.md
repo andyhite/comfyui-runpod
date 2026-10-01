@@ -1,11 +1,13 @@
 # ComfyUI on RunPod via dstack
 
 Spin up a ComfyUI pod on RunPod (any region) with your custom nodes,
-workflows, and config provisioned declaratively. Two launch modes, same
-image/fleet/task file: `make up` pins the RTX5090 (fast, ~$0.99/hr);
-`make up-cheap` widens the GPU list to the whole Blackwell menu and takes
-whichever card is cheapest right now (usually an RTXPRO4000, ~$0.57/hr,
-slower). Both stay under the $1.50/hr cap.
+workflows, and config provisioned declaratively. Every pod runs a named
+deployment, one per model family (`krea`, `minimax`, `wan`), with its own
+nodes, settings, and models. Two launch modes, same image/fleet/task file:
+`make up` pins the RTX5090 (fast, ~$0.99/hr); `make up-cheap` widens the GPU
+list to the whole Blackwell menu and takes whichever card is cheapest right
+now (usually an RTXPRO4000, ~$0.57/hr, slower). Both stay under the $1.50/hr
+cap.
 
 ## How it works
 
@@ -19,17 +21,22 @@ slower). Both stay under the $1.50/hr cap.
   dstack can't filter by driver, the config whitelists CUDA-13 GPU
   architectures, and the entrypoint runs a CUDA preflight that exits so
   dstack's `retry` lands a working host.
-- **R2 is an exact mirror** of five directories: `custom_nodes/`, `user/`,
-  `models/`, `input/`, and `output/`. Nothing is uploaded to the pod —
-  everything the pod needs is restored from R2 at boot.
+- **R2 layout** — two trees in the bucket:
+  - `deployments/<name>/{custom_nodes,user,models}/` — restored at boot, then
+    mirrored back exactly.
+  - `data/<pod id>/{input,output}/` — upload-only: each pod writes its own
+    folder, named after its RunPod pod id, and nothing is restored from it.
+
+  Nothing is uploaded to the pod from your machine; everything it needs comes
+  from R2.
 - **`entrypoint.sh`** at boot: populate ComfyUI from the baked image if the disk
-  is fresh → restore `custom_nodes`, `user`, `input`, and `output` from R2
-  (blocking) → install custom-node dependencies → restore `models` in the
-  background (ComfyUI comes up while it streams) → pin ComfyUI to a loopback
-  bind (see Trade-offs) → run the image's `/start.sh` (venv, ComfyUI, SSH,
-  JupyterLab, FileBrowser). A filesystem watcher per directory mirrors every
-  change back to R2, starting only once that directory's restore has
-  succeeded. When the pod stops, each mirrored directory gets one final sync.
+  is fresh → restore the deployment's `custom_nodes` and `user` (blocking) →
+  install custom-node dependencies → restore `models` in the background
+  (ComfyUI comes up while it streams) → pin ComfyUI to a loopback bind (see
+  Trade-offs) → run the image's `/start.sh` (venv, ComfyUI, SSH, JupyterLab,
+  FileBrowser). A filesystem watcher per directory pushes every change to R2;
+  a deployment directory's watcher starts only once its restore has succeeded.
+  When the pod stops, each watched directory gets one final push.
 
 ## Usage
 
@@ -37,15 +44,37 @@ slower). Both stay under the $1.50/hr cap.
 make image-build   # once (and when entrypoint.sh or the Dockerfile changes); needs `docker login ghcr.io`
 make server        # terminal 1, leave running
 make fleet         # once — registers the instance pool dstack provisions into
-make up            # provision pod + attach (RTX5090, pinned)
-# ...or: make up-cheap   # same run, on whichever Blackwell GPU is cheapest right now
+make up DEPLOYMENT=krea   # provision pod + attach (RTX5090, pinned); DEPLOYMENT is required
+# ...or: make up-cheap DEPLOYMENT=krea   # same run, on whichever Blackwell GPU is cheapest right now
 # → http://localhost:8188 (ComfyUI), :8888 (Jupyter), :8080 (FileBrowser)
-make down          # stop: final sync to R2, then the pod is deleted
+make down          # stop: final push to R2, then the pod is deleted
 make test          # entrypoint tests + shellcheck (bash 4.4+)
 ```
 
 Install models and nodes on the running pod (ComfyUI-Manager); they mirror to
-R2 automatically.
+the deployment in R2 automatically.
+
+### Deployments
+
+`make up` and `make up-cheap` refuse to run without `DEPLOYMENT=<name>`, and so
+does a bare `dstack apply` (the task declares `DEPLOYMENT` with no value). The
+pod restores and mirrors `deployments/<name>/`: its own `custom_nodes/`,
+`user/`, and `models/`, so a Wan pod never downloads Krea or MiniMax models.
+There's one deployment per model family: `krea` (Krea 2 + its LoRAs, the
+upscaler, BiRefNet), `minimax` (MiniMax H3), and `wan` (Wan 2.2), each with its
+family's workflows.
+
+- **A new deployment starts empty**: the image's four baked node packs, no
+  models, default settings. Install what it needs; its watchers seed R2.
+- **One pod at a time**: `make up` with a different `DEPLOYMENT` stops the
+  running pod (final push included), then starts the new one.
+- **Copying from another deployment**: pull the files onto the running pod and
+  let its watcher upload them. For example, in a Jupyter terminal:
+  `rclone copy r2:comfyui/deployments/krea/user/default/workflows /workspace/runpod-slim/ComfyUI/user/default/workflows`.
+  Never copy into the R2 path of a deployment whose pod is running: that pod's
+  next sync deletes whatever it doesn't have locally.
+- **Another bucket**: `make up DEPLOYMENT=<name> R2_BUCKET=<bucket>`. The R2 API
+  token must cover that bucket; deployments in one bucket need no new token.
 
 ### Rolling back
 
@@ -60,21 +89,27 @@ R2 automatically.
 
 ## Trade-offs & Persistence
 
-- **Models** — R2 is the sole source; there's no manifest. A first-ever boot
-  against an empty R2 has zero models. Download what you need once
-  (ComfyUI-Manager, or the MCP download tool) and the watcher seeds R2; every
-  later boot restores from there. Gated repos (Flux.2 Klein 9B) still need an HF
-  token + license acceptance at huggingface.co/black-forest-labs/FLUX.2-klein-9B.
-- **Persistence** — R2 mirrors `custom_nodes/`, `user/`, `models/`, `input/`,
-  and `output/` exactly. At boot, everything but `models` restores with `sync`
-  before ComfyUI starts, so the pod becomes an exact copy of R2. `output/` has
-  to: ComfyUI numbers new files from what's on disk, so on a half-restored
-  `output/` it would reuse old names and the restore would overwrite the new
-  images. The cost is boot time — a big `output/` makes boots slower. `models`
+- **Models** — R2 is the sole source; there's no manifest. A new deployment
+  starts with zero models. Download what you need once (ComfyUI-Manager, or the
+  MCP download tool) and the watcher seeds R2; every later boot of that
+  deployment restores from there. Gated repos (Flux.2 Klein 9B) still need an
+  HF token + license acceptance at
+  huggingface.co/black-forest-labs/FLUX.2-klein-9B.
+- **Persistence** — a deployment's `custom_nodes/`, `user/`, and `models/` are
+  mirrored exactly. At boot, `custom_nodes` and `user` restore with `sync`
+  before ComfyUI starts, so the pod becomes an exact copy of R2; `models`
   restores in the background with `copy`, so a model downloaded mid-restore
   survives. The running mirror (pod → R2) uses `sync`, so deletions and renames
   propagate — delete something on the pod and it's gone from R2 after the next
   debounce.
+- **Inputs and outputs** — never restored. Every pod starts with an empty
+  `input/` and `output/` and uploads them with `copy` to `data/<pod id>/` (the
+  id is in the boot log, `make logs`), so deleting a file on the pod doesn't
+  delete it from R2. One folder per pod is what makes skipping the restore
+  safe: ComfyUI numbers new files from what's on disk, so pods sharing a folder
+  would overwrite each other's `ComfyUI_00001_.png`. To reuse an earlier input,
+  upload it in the UI or pull it onto the pod:
+  `rclone copy r2:comfyui/data/<pod id>/input/x.png /workspace/runpod-slim/ComfyUI/input/`.
 - **Excludes** — `.venv`, `venv`, `__pycache__`, `*.pyc`, `*.part*`, `*.tmp`,
   `*.log`, and `comfyui.db*` are excluded everywhere; `user` additionally
   excludes `__manager/cache/**`. `.git` is kept, so ComfyUI-Manager can still
@@ -83,8 +118,9 @@ R2 automatically.
   can't be copied safely mid-write), `~/.cache/huggingface` (transformers-based
   nodes cache models there and re-download them each boot), and anything under
   `/workspace` outside `ComfyUI/`, such as Jupyter notebooks.
-- **Safety** — a directory's watcher, and its final sync on stop, run only
-  after its restore succeeds, so a degraded boot can never wipe R2.
+- **Safety** — a deployment directory's watcher, and its final push on stop,
+  run only after its restore succeeds, so a degraded boot can never wipe R2.
+  Inputs and outputs never delete anything from R2.
 - **Loopback bind** — the entrypoint appends `--listen 127.0.0.1` to
   `/workspace/runpod-slim/comfyui_args.txt`, which `/start.sh` appends after its
   own `--listen 0.0.0.0` (argparse takes the last one). ComfyUI-Manager permits
@@ -104,7 +140,7 @@ R2 automatically.
 
 | File | Purpose |
 |---|---|
-| `Dockerfile`, `entrypoint.sh` | custom image; entrypoint restores + mirrors the five R2 directories |
+| `Dockerfile`, `entrypoint.sh` | custom image; entrypoint restores + mirrors the deployment, uploads inputs and outputs |
 | `comfyui.dstack.yml` | the run (task): image, GPU, ports, R2 env; `make up-cheap` reuses it with a wider GPU list |
 | `comfyui-fleet.dstack.yml` | the instance pool |
 | `Makefile` | commands |

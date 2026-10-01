@@ -5,16 +5,20 @@
 # (volume-less) disk before ComfyUI launches:
 #   1. CUDA-13 preflight (exit non-zero on an old-driver host so dstack retries)
 #   2. populate ComfyUI from the baked copy if the disk is fresh
-#   3. restore custom_nodes, user, input, and output from R2 (blocking), then
+#   3. restore the deployment's custom_nodes and user from R2 (blocking), then
 #      install node deps
-#   4. restore models from R2 in the background (ComfyUI comes up first)
-#   5. start a filesystem-watcher per dir that rclone-syncs it back to R2, so R2
-#      stays an EXACT mirror. Each watcher starts only after its restore succeeds.
+#   4. restore the deployment's models from R2 in the background (ComfyUI comes
+#      up first)
+#   5. start a filesystem-watcher per dir that pushes it to R2: the deployment's
+#      dirs are mirrored exactly, each watcher starting only after its restore
+#      succeeds; input and output are never restored, only uploaded to this
+#      pod's own data folder.
 # then run /start.sh (venv, ComfyUI, SSH, JupyterLab, FileBrowser) and, when the
-# pod is stopped, sync every mirrored dir one last time.
+# pod is stopped, push every watched dir one last time.
 #
-# R2 persistence activates only when RCLONE_CONFIG_R2_* + R2_BUCKET + R2_ACCOUNT_ID
-# are set (dstack secrets/env); otherwise the pod runs with no persistence.
+# R2 persistence activates only when RCLONE_CONFIG_R2_* + R2_BUCKET +
+# R2_ACCOUNT_ID + DEPLOYMENT are set (dstack secrets/env); otherwise the pod
+# runs with no persistence.
 set -uo pipefail
 
 COMFY_DIR=/workspace/runpod-slim/ComfyUI
@@ -24,19 +28,20 @@ export COMFYUI_PATH="$COMFY_DIR"
 # before /start.sh runs — without it a node requirement can swap the CUDA-13
 # torch for a stock build.
 export PIP_CONSTRAINT=/opt/comfyui-runtime-constraints.txt
-# One file per dir whose restore succeeded, holding its sync args: exactly the
-# dirs the shutdown flush may push to R2.
+# One file per watched dir, holding its push args: exactly the dirs the shutdown
+# flush may push to R2.
 MIRROR_STATE=/tmp/r2-mirrors
 
 log() { echo "[dstack-entry] $*"; }
 
 # ---------------------------------------------------------------------------
-# R2 mirror library. R2 is an exact copy of five dirs: custom_nodes, user,
-# input, models, output. A restore (R2->pod) brings the pod in line with R2; the
-# running mirror (pod->R2) uses `sync` (destructive — deletions/renames
-# propagate).
-# A dir's up-sync watcher starts ONLY after its restore succeeds, so a degraded
-# pod can never wipe good data in R2.
+# R2 library. The bucket holds two trees:
+#   deployments/<DEPLOYMENT>/{custom_nodes,user,models} — restored at boot
+#     (R2->pod), then mirrored back with `sync` (destructive: deletions and
+#     renames propagate). A dir's watcher starts ONLY after its restore
+#     succeeds, so a degraded pod can never wipe good data in R2.
+#   data/<pod id>/{input,output} — never restored, uploaded with `copy`, so
+#     nothing the pod does can delete from R2.
 # ---------------------------------------------------------------------------
 
 # Exclude sets. Kept in sync across two syntaxes: rclone globs and one POSIX
@@ -154,19 +159,20 @@ restore_dir() {
     --stats=20s --stats-one-line --stats-log-level NOTICE "$@"
 }
 
-# Mirror a directory up to R2 (destructive exact copy). --fast-list: one
+# Push a directory to R2 with `rclone VERB`: `sync` makes R2 an exact copy
+# (deletions propagate), `copy` only adds and updates. --fast-list: one
 # recursive listing instead of a ListObjects call per directory.
-sync_up() {
-  local local_dir="$1" subpath="$2"; shift 2
-  rclone sync "$local_dir" "r2:$R2_BUCKET/$subpath" --fast-list \
+push() {
+  local local_dir="$1" subpath="$2" verb="$3"; shift 3
+  rclone "$verb" "$local_dir" "r2:$R2_BUCKET/$subpath" --fast-list \
     --stats=20s --stats-one-line --stats-log-level NOTICE "$@"
 }
 
-# One watcher session: sync once up front — catching anything written before
+# One watcher session: push once up front — catching anything written before
 # the watch was set up, e.g. a model downloaded while models was restoring —
 # then once per debounced burst of events. Returns when inotifywait exits.
 watch_once() {
-  local local_dir="$1" subpath="$2" regex="$3"; shift 3
+  local local_dir="$1" subpath="$2" verb="$3" regex="$4"; shift 4
   { echo initial
     inotifywait -m -r -q \
       -e create -e delete -e modify -e moved_to -e moved_from \
@@ -176,14 +182,14 @@ watch_once() {
   while read -r _; do
     # Debounce: drain further events until DEBOUNCE seconds of quiet.
     while read -r -t "${DEBOUNCE:-15}" _; do :; done
-    sync_up "$local_dir" "$subpath" "$@"
+    push "$local_dir" "$subpath" "$verb" "$@"
   done
 }
 
-# Mirror a dir until the pod stops. inotifywait can exit (e.g. when the host's
+# Push a dir until the pod stops. inotifywait can exit (e.g. when the host's
 # inotify instance/watch limits run out); restart it instead of silently
-# dropping the mirror. Each restart syncs first, so at worst this degrades to a
-# sync every minute.
+# dropping the dir. Each restart pushes first, so at worst this degrades to a
+# push every minute.
 watch_sync() {
   while :; do
     watch_once "$@"
@@ -192,33 +198,35 @@ watch_sync() {
   done
 }
 
-# Arm a restored dir: record its sync args for the shutdown flush, then
-# background its watcher. Split out so tests can override it.
+# Arm a dir: record its push args (local dir, R2 subpath, verb, inotify regex,
+# rclone excludes) for the shutdown flush, then background its watcher. Split
+# out so tests can override it.
 start_watcher() {
-  printf '%s\0' "$@" > "$MIRROR_STATE/$2"
+  printf '%s\0' "$@" > "$MIRROR_STATE/${1##*/}"
   watch_sync "$@" &
 }
 
-# Restore a dir, and ONLY on success start its watcher. The gate that upholds
-# the safety invariant.
+# Restore a deployment dir, and ONLY on success start mirroring it back with
+# `sync`. The gate that upholds the safety invariant.
 restore_and_watch() {
   local local_dir="$1" subpath="$2" verb="$3" regex="$4"; shift 4
   if restore_dir "$local_dir" "$subpath" "$verb" "$@"; then
-    start_watcher "$local_dir" "$subpath" "$regex" "$@"
+    start_watcher "$local_dir" "$subpath" sync "$regex" "$@"
     return 0
   fi
   return 1
 }
 
-# Final sync of every armed dir (restore succeeded — the watchers' gate), in
-# parallel so it fits dstack's stop grace period.
+# Final push of every armed dir (a deployment dir is armed only once its restore
+# succeeded — the watchers' gate), in parallel so it fits dstack's stop grace
+# period.
 flush_mirrors() {
   local marker args pids=()
   for marker in "$MIRROR_STATE"/*; do
     [ -f "$marker" ] || continue
     mapfile -d '' -t args < "$marker"
-    log "final sync of ${args[1]} to R2..."
-    sync_up "${args[0]}" "${args[1]}" "${args[@]:3}" &
+    log "final ${args[2]} of ${args[1]} to R2..."
+    push "${args[0]}" "${args[1]}" "${args[2]}" "${args[@]:4}" &
     pids+=("$!")
   done
   # Never a bare `wait`: it would also wait on the never-ending watchers.
@@ -268,37 +276,41 @@ install_node_deps() {
     || log "WARNING: some node deps failed to install — check the logs."
 }
 
-# Restore + mirror all five dirs, each watcher gated on its restore.
+# Restore + mirror the deployment's dirs, and arm this pod's data uploads.
 #
-# Blocking: custom_nodes, user, input, output — everything ComfyUI reads at
-# startup or writes on its own. output MUST land before ComfyUI starts: it
-# numbers new files from what's on disk, so on a not-yet-restored output/ it
-# reuses ComfyUI_00001_.png and the restore then overwrites the new image with
-# the old one. Nothing on the pod is newer than R2 yet, so these restore with
-# `sync`: the pod becomes an exact copy instead of R2 + the baked tree (a baked
-# node pack you uninstalled would otherwise come back and be re-mirrored).
+# Deployment (deployments/$DEPLOYMENT/), each watcher gated on its restore:
+# custom_nodes and user block — ComfyUI reads them at startup — and restore
+# with `sync`: the pod becomes an exact copy instead of R2 + the baked tree (a
+# baked node pack you uninstalled would otherwise come back and be
+# re-mirrored). models — the bulk of the bytes — streams in the background
+# while ComfyUI comes up, with `copy`, so a model downloaded mid-restore
+# survives.
 #
-# Background: models — the bulk of the bytes; ComfyUI comes up while it
-# streams. `copy`, not `sync`: a model downloaded mid-restore must survive.
+# Data (data/$POD_ID/): input and output start empty and are only uploaded,
+# with `copy`, so R2 keeps everything the pod produced even after it's deleted
+# on the pod. Skipping the restore is safe because every pod writes its own
+# folder: ComfyUI numbers new files from what's on disk, so two pods sharing a
+# folder would overwrite each other's ComfyUI_00001_.png.
 start_r2_persistence() {
   rm -rf "$MIRROR_STATE"; mkdir -p "$MIRROR_STATE"
+  local deployment="deployments/$DEPLOYMENT" dir
 
-  if restore_dir "$COMFY_DIR/custom_nodes" custom_nodes sync "${GLOBAL_RCLONE_EXCLUDES[@]}"; then
+  for dir in input output; do
+    mkdir -p "$COMFY_DIR/$dir"
+    start_watcher "$COMFY_DIR/$dir" "data/$POD_ID/$dir" copy "$GLOBAL_INOTIFY_EXCLUDE" "${GLOBAL_RCLONE_EXCLUDES[@]}"
+  done
+
+  if restore_dir "$COMFY_DIR/custom_nodes" "$deployment/custom_nodes" sync "${GLOBAL_RCLONE_EXCLUDES[@]}"; then
     install_node_deps
-    start_watcher "$COMFY_DIR/custom_nodes" custom_nodes "$GLOBAL_INOTIFY_EXCLUDE" "${GLOBAL_RCLONE_EXCLUDES[@]}"
+    start_watcher "$COMFY_DIR/custom_nodes" "$deployment/custom_nodes" sync "$GLOBAL_INOTIFY_EXCLUDE" "${GLOBAL_RCLONE_EXCLUDES[@]}"
   else
     log "custom_nodes restore failed — skipping node dep install + watcher (protecting R2)"
   fi
 
-  restore_and_watch "$COMFY_DIR/user" user sync "$USER_INOTIFY_EXCLUDE" "${USER_RCLONE_EXCLUDES[@]}" \
+  restore_and_watch "$COMFY_DIR/user" "$deployment/user" sync "$USER_INOTIFY_EXCLUDE" "${USER_RCLONE_EXCLUDES[@]}" \
     || log "user restore failed — skipping its watcher (protecting R2)"
-  local subpath
-  for subpath in input output; do
-    restore_and_watch "$COMFY_DIR/$subpath" "$subpath" sync "$GLOBAL_INOTIFY_EXCLUDE" "${GLOBAL_RCLONE_EXCLUDES[@]}" \
-      || log "$subpath restore failed — skipping its watcher (protecting R2)"
-  done
 
-  { restore_and_watch "$COMFY_DIR/models" models copy "$GLOBAL_INOTIFY_EXCLUDE" "${GLOBAL_RCLONE_EXCLUDES[@]}" \
+  { restore_and_watch "$COMFY_DIR/models" "$deployment/models" copy "$GLOBAL_INOTIFY_EXCLUDE" "${GLOBAL_RCLONE_EXCLUDES[@]}" \
       || log "models restore failed — skipping its watcher (protecting R2)"
   } &
 }
@@ -324,11 +336,16 @@ fi
 log "CUDA 13 preflight OK."
 
 R2=0
-if [ -n "${RCLONE_CONFIG_R2_ACCESS_KEY_ID:-}" ] && [ -n "${R2_BUCKET:-}" ] && [ -n "${R2_ACCOUNT_ID:-}" ]; then
+if [ -n "${RCLONE_CONFIG_R2_ACCESS_KEY_ID:-}" ] && [ -n "${R2_BUCKET:-}" ] && [ -n "${R2_ACCOUNT_ID:-}" ] \
+   && [ -n "${DEPLOYMENT:-}" ]; then
   export RCLONE_CONFIG_R2_ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-  R2=1; log "R2 persistence enabled (bucket: $R2_BUCKET)"
+  # RunPod sets RUNPOD_POD_ID and the dstack runner passes the container's env
+  # through to the job; the hostname is only a fallback off RunPod.
+  POD_ID="${RUNPOD_POD_ID:-$HOSTNAME}"
+  R2=1
+  log "R2 persistence enabled: r2:$R2_BUCKET/deployments/$DEPLOYMENT (restore + mirror), r2:$R2_BUCKET/data/$POD_ID (uploads)"
 else
-  log "R2 not configured — no persistence (nothing restored or mirrored)"
+  log "R2 or DEPLOYMENT not configured — no persistence (nothing restored or mirrored)"
 fi
 
 # 1) Fresh disk: populate ComfyUI ourselves so we can modify it before launch.
@@ -338,9 +355,9 @@ if [ ! -d "$COMFY_DIR" ]; then
   cp -r "$BAKED" "$COMFY_DIR"
 fi
 
-# Restore state from R2 and start the directory mirrors. custom_nodes, user,
-# input, and output finish before ComfyUI launches; models streams in the
-# background. Skipped entirely when R2 isn't configured.
+# Restore the deployment from R2 and start the watchers. custom_nodes and user
+# finish before ComfyUI launches; models streams in the background; input and
+# output only upload. Skipped entirely when R2 or DEPLOYMENT isn't configured.
 if [ "$R2" = 1 ]; then
   start_r2_persistence
 fi

@@ -1,10 +1,10 @@
 # Custom ComfyUI image for RunPod + dstack.
 #
 # A thin wrapper over RunPod's official image. It only adds a smart entrypoint
-# that, at boot, restores five R2-mirrored directories (custom_nodes, user,
-# models, input, output), installs custom-node deps, starts a filesystem-watcher
-# per dir that mirrors it back to R2, then hands off to the base image's
-# /start.sh.
+# that, at boot, restores the deployment's R2-mirrored directories
+# (custom_nodes, user, models), installs custom-node deps, starts a
+# filesystem-watcher per dir that pushes it to R2 (input and output upload only,
+# to a per-pod folder), then hands off to the base image's /start.sh.
 # R2 is the single source of truth; this image only needs a rebuild when
 # entrypoint.sh, the deps below, or the ComfyUI pin change.
 #

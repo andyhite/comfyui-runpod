@@ -22,9 +22,9 @@ retry:
   on_events: [no-capacity, error, interruption]
   duration: 1h
 
-# Nothing is uploaded to the pod anymore: models, custom nodes, the user dir,
-# inputs, and outputs all live in R2 and are restored at boot by the entrypoint.
-# (Set the R2 secrets below to enable that.)
+# Nothing is uploaded to the pod: the entrypoint restores the deployment
+# (custom nodes, the user dir, models) from R2 at boot and uploads inputs and
+# outputs to R2. (Set the R2 secrets below to enable that.)
 
 # Secrets (set once with `dstack secret set <NAME> <value>`) — keeps account-
 # specific values out of this public repo. The entrypoint builds the R2 endpoint
@@ -34,7 +34,7 @@ retry:
 #   R2_ACCESS_KEY_ID      from a Cloudflare R2 API token (Object Read & Write)
 #   R2_SECRET_ACCESS_KEY  ditto
 # All four must exist: dstack terminates a run whose config references an unset
-# secret. The R2 ones enable persistence for all five mirrored dirs.
+# secret. The R2 ones enable persistence.
 env:
   - HF_TOKEN=${{ secrets.HF_TOKEN }}
   # Let pip find the image's CUDA-pinned torch wheel when ComfyUI-Manager (or the
@@ -43,6 +43,11 @@ env:
   # with "ResolutionImpossible". Must match the image's CUDA build (cuda13.0 -> cu130).
   - PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu130
   - R2_BUCKET=comfyui
+  # Required, no default: the deployment (deployments/<name>/ in the bucket)
+  # whose custom_nodes, user, and models the pod restores and mirrors. dstack
+  # refuses to apply without it: `make up DEPLOYMENT=<name>`, or
+  # `dstack apply -e DEPLOYMENT=<name>`.
+  - DEPLOYMENT
   - R2_ACCOUNT_ID=${{ secrets.R2_ACCOUNT_ID }}
   - RCLONE_CONFIG_R2_TYPE=s3
   - RCLONE_CONFIG_R2_PROVIDER=Cloudflare
@@ -90,11 +95,12 @@ utilization_policy:
   min_gpu_utilization: 10
   time_window: 30m
 
-# No `commands`: the custom image's entrypoint restores custom_nodes, user,
-# input, and output from R2 (blocking), installs node deps, streams models from
-# R2 in the background, starts a watcher per dir that mirrors it back to R2,
-# then runs the base image's /start.sh — and gives every mirrored dir a final
-# sync when the run stops (dstack allows stop_duration, default 5m).
+# No `commands`: the custom image's entrypoint restores the deployment's
+# custom_nodes and user from R2 (blocking), installs node deps, streams models
+# from R2 in the background, starts a watcher per dir that pushes it to R2, then
+# runs the base image's /start.sh — and gives every watched dir a final push
+# when the run stops (dstack allows stop_duration, default 5m).
 #
-# Persistence is via R2 (see env above): R2 is an exact mirror of
-# custom_nodes/, user/, models/, input/, and output/.
+# Persistence is via R2 (see env above): deployments/<DEPLOYMENT>/ is an exact
+# mirror of custom_nodes/, user/, and models/; input/ and output/ upload to
+# data/<pod id>/ and are never restored.

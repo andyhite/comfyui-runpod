@@ -4,15 +4,15 @@
 #   make image-build     # build & push the custom image (once; and when entrypoint.sh or the ComfyUI pin changes)
 #   make server          # terminal 1 — leave running
 #   make fleet           # register the instance pool (once)
-#   make up              # provision the pod + attach (RTX5090, fast/pricier)
-#   make up-cheap        # ...or provision on whatever Blackwell GPU is cheapest
+#   make up DEPLOYMENT=krea          # provision the pod + attach (RTX5090, fast/pricier)
+#   make up-cheap DEPLOYMENT=krea    # ...or on whatever Blackwell GPU is cheapest
 #   open http://localhost:8188   (ComfyUI; also 8888 Jupyter, 8080 FileBrowser)
 #   make down            # tear the pod down when finished
 #
 # Day-to-day: install models/nodes on the running pod (ComfyUI-Manager). They
-# mirror to R2 automatically; workflows + config + inputs + outputs persist to
-# R2 too. An image rebuild is only needed when entrypoint.sh or the ComfyUI pin
-# changes.
+# mirror to the deployment in R2 automatically, as do workflows + config;
+# inputs + outputs upload to R2 under data/<pod id>/. An image rebuild is only
+# needed when entrypoint.sh or the ComfyUI pin changes.
 
 # Custom image (must match `image:` in comfyui.dstack.yml). RunPod is x86_64.
 IMAGE        ?= ghcr.io/andyhite/comfyui-runpod
@@ -41,9 +41,17 @@ TASK_FILE    ?= comfyui.dstack.yml
 FLEET_FILE   ?= comfyui-fleet.dstack.yml
 CHEAP_GPU    ?= RTXPRO4000,RTXPRO4500,RTX5090,RTXPRO5000:24GB..
 
-.DEFAULT_GOAL := help
-
+# Which deployment the pod runs — required by `make up`/`up-cheap`, no default.
+# deployments/<DEPLOYMENT>/ in the bucket holds its custom_nodes, user, and
+# models (restored at boot, mirrored back), so a pod downloads only that
+# deployment's models. Every pod also uploads its input/ and output/ to
+# data/<pod id>/ (never restored). Add R2_BUCKET=<bucket> to use another bucket.
 R2_BUCKET    ?= comfyui
+DEPLOYMENT   ?=
+UP            = $(if $(DEPLOYMENT),,$(error DEPLOYMENT is required: make $@ DEPLOYMENT=<name>)) \
+                dstack apply -y -f $(TASK_FILE) -e R2_BUCKET=$(R2_BUCKET) -e DEPLOYMENT=$(DEPLOYMENT)
+
+.DEFAULT_GOAL := help
 
 .PHONY: help image-build server fleet up up-cheap down logs attach ps status \
         panel test r2-bucket secrets-help
@@ -64,11 +72,11 @@ server: ## Start the dstack server (foreground; leave running). Override: make s
 fleet: ## Register/refresh the instance pool (one-time; re-run after editing the fleet)
 	dstack apply -y -f $(FLEET_FILE)
 
-up: ## Provision the pod on the pinned RTX5090 (fast, ~$0.99/hr). Override file: make up TASK_FILE=...
-	dstack apply -y -f $(TASK_FILE)
+up: ## Provision the pod on the pinned RTX5090 (fast, ~$0.99/hr). Requires DEPLOYMENT=<name>
+	$(UP)
 
-up-cheap: ## Provision the pod on whichever Blackwell GPU is cheapest right now (usually RTXPRO4000, ~$0.57/hr, slower)
-	dstack apply -y -f $(TASK_FILE) --gpu $(CHEAP_GPU)
+up-cheap: ## Provision the pod on whichever Blackwell GPU is cheapest right now (usually RTXPRO4000, ~$0.57/hr, slower). Requires DEPLOYMENT=<name>
+	$(UP) --gpu $(CHEAP_GPU)
 
 down: ## Stop and tear down the pod
 	dstack stop -y $(RUN)
