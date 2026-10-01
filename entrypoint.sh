@@ -5,12 +5,13 @@
 # (volume-less) disk before ComfyUI launches:
 #   1. CUDA-13 preflight (exit non-zero on an old-driver host so dstack retries)
 #   2. populate ComfyUI from the baked copy if the disk is fresh
-#   3. restore custom_nodes + user from R2 (blocking), then install node deps
-#   4. restore input + models + output from R2 in the background (ComfyUI first)
+#   3. restore custom_nodes, user, input, and output from R2 (blocking), then
+#      install node deps
+#   4. restore models from R2 in the background (ComfyUI comes up first)
 #   5. start a filesystem-watcher per dir that rclone-syncs it back to R2, so R2
 #      stays an EXACT mirror. Each watcher starts only after its restore succeeds.
-# then hand off to /start.sh, which creates the venv and launches ComfyUI, SSH,
-# JupyterLab, and FileBrowser.
+# then run /start.sh (venv, ComfyUI, SSH, JupyterLab, FileBrowser) and, when the
+# pod is stopped, sync every mirrored dir one last time.
 #
 # R2 persistence activates only when RCLONE_CONFIG_R2_* + R2_BUCKET + R2_ACCOUNT_ID
 # are set (dstack secrets/env); otherwise the pod runs with no persistence.
@@ -19,12 +20,19 @@ set -uo pipefail
 COMFY_DIR=/workspace/runpod-slim/ComfyUI
 BAKED=/opt/comfyui-baked
 export COMFYUI_PATH="$COMFY_DIR"
+# The base image's torch pin. /start.sh exports it too, but node deps install
+# before /start.sh runs — without it a node requirement can swap the CUDA-13
+# torch for a stock build.
+export PIP_CONSTRAINT=/opt/comfyui-runtime-constraints.txt
+# One file per dir whose restore succeeded, holding its sync args: exactly the
+# dirs the shutdown flush may push to R2.
+MIRROR_STATE=/tmp/r2-mirrors
 
 log() { echo "[dstack-entry] $*"; }
 
 # ---------------------------------------------------------------------------
 # R2 mirror library. R2 is an exact copy of five dirs: custom_nodes, user,
-# models, input, output. Restore (R2->pod) uses `copy` (non-destructive); the
+# input, models, output. A restore (R2->pod) brings the pod in line with R2; the
 # running mirror (pod->R2) uses `sync` (destructive — deletions/renames
 # propagate).
 # A dir's up-sync watcher starts ONLY after its restore succeeds, so a degraded
@@ -43,29 +51,31 @@ USER_RCLONE_EXCLUDES=("${GLOBAL_RCLONE_EXCLUDES[@]}" --exclude '__manager/cache/
 GLOBAL_INOTIFY_EXCLUDE='(/\.venv/|/venv/|/__pycache__/|\.pyc$|\.part|\.tmp$|\.log$|comfyui\.db)'
 USER_INOTIFY_EXCLUDE='(/\.venv/|/venv/|/__pycache__/|\.pyc$|\.part|\.tmp$|\.log$|comfyui\.db|/__manager/cache/)'
 
-# Run `rclone copy` guarded against a stalled transfer: if it makes no
-# forward progress (bytes transferred, polled via rclone's rc API) for
-# STALL_AFTER seconds, kill it and retry. Covers a single file's multi-thread
-# chunk hitting a badly degraded connection while the rest of the transfer is
-# fine — observed once taking 40+ minutes on a ~14GB file whose identically
-# sized sibling, started at the same moment, finished in under 4. rclone has
-# no "minimum speed" abort flag, and a true idle-connection --timeout doesn't
-# fire here since the stalled chunk still trickles a few bytes rather than
-# going fully silent. rclone copy is safe to kill and rerun: local
-# destinations write to a temp file and atomically rename on success, so a
-# retry only redoes whatever didn't finish.
-rclone_copy_stall_guarded() {
-  local src="$1" dst="$2"; shift 2
+# Run `rclone copy|sync SRC DST ARGS...` guarded against a stalled transfer: if
+# it moves less than RESTORE_STALL_MIN_BYTES in RESTORE_STALL_AFTER seconds
+# (bytes transferred, polled via rclone's rc API), kill it and retry. Covers a
+# single file's multi-thread chunk hitting a badly degraded connection while the
+# rest of the transfer is fine — observed once taking 40+ minutes on a ~14GB
+# file whose identically sized sibling, started at the same moment, finished in
+# under 4. rclone has no "minimum speed" abort flag, and a true idle-connection
+# --timeout doesn't fire here since the stalled chunk still trickles a few bytes
+# rather than going fully silent — hence a progress floor, not "zero bytes".
+# rclone is safe to kill and rerun: local destinations write to a temp file and
+# atomically rename on success, and `sync` deletes only after every transfer
+# succeeded, so a retry only redoes whatever didn't finish.
+rclone_stall_guarded() {
+  local verb="$1" src="$2" dst="$3"; shift 3
   local max_attempts="${RESTORE_MAX_ATTEMPTS:-3}" stall_after="${RESTORE_STALL_AFTER:-360}" \
+        min_progress="${RESTORE_STALL_MIN_BYTES:-1048576}" \
         poll_every="${RESTORE_POLL_EVERY:-30}" retry_backoff="${RESTORE_RETRY_BACKOFF:-10}"
-  local attempt port pid bytes last_bytes stalled rc waited
+  local attempt port pid bytes mark stalled rc waited
   for attempt in $(seq 1 "$max_attempts"); do
     # Random port per attempt: avoids racing the OS over releasing the
     # previous attempt's port right after killing it.
     port=$((20000 + RANDOM % 20000))
-    rclone copy "$src" "$dst" --rc --rc-addr "127.0.0.1:$port" --rc-no-auth "$@" &
+    rclone "$verb" "$src" "$dst" --rc --rc-addr "127.0.0.1:$port" --rc-no-auth "$@" &
     pid=$!
-    last_bytes=-1 stalled=0
+    mark=-1 stalled=0
     while kill -0 "$pid" 2>/dev/null; do
       # Poll for exit every 1s (not a blind sleep poll_every) so a process
       # that finishes mid-interval is noticed promptly instead of up to
@@ -76,18 +86,20 @@ rclone_copy_stall_guarded() {
         waited=$((waited + 1))
       done
       kill -0 "$pid" 2>/dev/null || break
+      # core/stats is tab-indented JSON (`"bytes": 123`). Its keys are sorted,
+      # so the first "bytes" is the top-level total, not a `transferring` entry.
       bytes="$(curl -s -m 5 -X POST "http://127.0.0.1:$port/core/stats" 2>/dev/null \
-        | grep -o '"bytes":[0-9]*' | head -1 | cut -d: -f2)"
+        | grep -oE '"bytes": *[0-9]+' | head -1 | grep -oE '[0-9]+$')"
       [ -z "$bytes" ] && continue
-      if [ "$bytes" = "$last_bytes" ]; then
-        stalled=$((stalled + poll_every))
+      if [ "$mark" -lt 0 ] || [ $((bytes - mark)) -ge "$min_progress" ]; then
+        mark="$bytes" stalled=0
       else
-        stalled=0; last_bytes="$bytes"
+        stalled=$((stalled + poll_every))
       fi
       if [ "$stalled" -ge "$stall_after" ]; then
-        log "rclone copy to $dst stalled ${stall_after}s at $bytes bytes (attempt $attempt/$max_attempts) — killing and retrying"
+        log "rclone $verb to $dst moved under $min_progress bytes in ${stall_after}s (attempt $attempt/$max_attempts) — killing and retrying"
         kill -TERM "$pid" 2>/dev/null
-        sleep 5
+        for waited in 1 2 3 4 5; do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
         kill -KILL "$pid" 2>/dev/null
         break
       fi
@@ -95,18 +107,20 @@ rclone_copy_stall_guarded() {
     wait "$pid"
     rc=$?
     [ "$rc" -eq 0 ] && return 0
-    log "rclone copy to $dst exited $rc (attempt $attempt/$max_attempts)"
+    log "rclone $verb to $dst exited $rc (attempt $attempt/$max_attempts)"
     [ "$attempt" -lt "$max_attempts" ] && sleep "$retry_backoff"
   done
   return 1
 }
 
-# Restore a directory from R2. An empty/absent R2 path is a valid FRESH state
-# (return 0 so the watcher starts and seeds it). An lsf failure means R2 is
-# unreachable/misconfigured (return 1 — do NOT let a watcher start). A partial
-# copy failure also returns non-zero. Distinguishing these is the safety hinge.
+# Restore a directory from R2 with `rclone VERB`: `sync` makes the pod an exact
+# copy, `copy` keeps files that exist only on the pod. An empty/absent R2 path
+# is a valid FRESH state (return 0 so the watcher starts and seeds it). An lsf
+# failure means R2 is unreachable/misconfigured (return 1 — do NOT let a watcher
+# start). A partial transfer failure also returns non-zero. Distinguishing these
+# is the safety hinge.
 restore_dir() {
-  local local_dir="$1" subpath="$2"; shift 2
+  local local_dir="$1" subpath="$2" verb="$3"; shift 3
   mkdir -p "$local_dir"
   # One lsf call: its exit code gates "unreachable" (fail closed -> return 1, no
   # copy) and its captured output gates "empty prefix" (fresh -> return 0, no
@@ -123,7 +137,7 @@ restore_dir() {
     log "r2:$R2_BUCKET/$subpath is empty — fresh; watcher will seed it"
     return 0
   fi
-  log "restoring $subpath from R2..."
+  log "restoring $subpath from R2 ($verb)..."
   # rclone's periodic --stats are logged at INFO by default, i.e. invisible at
   # our default NOTICE level — --stats-log-level NOTICE surfaces them without
   # also turning on -v's noisy per-file transfer lines.
@@ -135,25 +149,30 @@ restore_dir() {
   # checkers, a lower multi-thread cutoff, and --fast-list (one recursive
   # listing instead of per-directory round-trips) keep throughput up. Big
   # monolithic checkpoints still multi-thread and saturate the link as before.
-  rclone_copy_stall_guarded "r2:$R2_BUCKET/$subpath" "$local_dir" \
+  rclone_stall_guarded "$verb" "r2:$R2_BUCKET/$subpath" "$local_dir" \
     --transfers 16 --checkers 16 --multi-thread-cutoff 64Mi --fast-list \
     --stats=20s --stats-one-line --stats-log-level NOTICE "$@"
 }
 
-# Mirror a directory up to R2 (destructive exact copy).
+# Mirror a directory up to R2 (destructive exact copy). --fast-list: one
+# recursive listing instead of a ListObjects call per directory.
 sync_up() {
   local local_dir="$1" subpath="$2"; shift 2
-  rclone sync "$local_dir" "r2:$R2_BUCKET/$subpath" \
+  rclone sync "$local_dir" "r2:$R2_BUCKET/$subpath" --fast-list \
     --stats=20s --stats-one-line --stats-log-level NOTICE "$@"
 }
 
-# Watch a directory and sync_up on each debounced burst. Runs until the pod stops.
-watch_sync() {
+# One watcher session: sync once up front — catching anything written before
+# the watch was set up, e.g. a model downloaded while models was restoring —
+# then once per debounced burst of events. Returns when inotifywait exits.
+watch_once() {
   local local_dir="$1" subpath="$2" regex="$3"; shift 3
-  inotifywait -m -r -q \
-    -e create -e delete -e modify -e moved_to -e moved_from \
-    --exclude "$regex" \
-    "$local_dir" |
+  { echo initial
+    inotifywait -m -r -q \
+      -e create -e delete -e modify -e moved_to -e moved_from \
+      --exclude "$regex" \
+      "$local_dir"
+  } |
   while read -r _; do
     # Debounce: drain further events until DEBOUNCE seconds of quiet.
     while read -r -t "${DEBOUNCE:-15}" _; do :; done
@@ -161,77 +180,127 @@ watch_sync() {
   done
 }
 
-# Background a watcher. Split out so tests can override it.
+# Mirror a dir until the pod stops. inotifywait can exit (e.g. when the host's
+# inotify instance/watch limits run out); restart it instead of silently
+# dropping the mirror. Each restart syncs first, so at worst this degrades to a
+# sync every minute.
+watch_sync() {
+  while :; do
+    watch_once "$@"
+    log "WARNING: $2 watcher exited — restarting in 60s"
+    sleep 60
+  done
+}
+
+# Arm a restored dir: record its sync args for the shutdown flush, then
+# background its watcher. Split out so tests can override it.
 start_watcher() {
+  printf '%s\0' "$@" > "$MIRROR_STATE/$2"
   watch_sync "$@" &
 }
 
 # Restore a dir, and ONLY on success start its watcher. The gate that upholds
 # the safety invariant.
 restore_and_watch() {
-  local local_dir="$1" subpath="$2" regex="$3"; shift 3
-  if restore_dir "$local_dir" "$subpath" "$@"; then
+  local local_dir="$1" subpath="$2" verb="$3" regex="$4"; shift 4
+  if restore_dir "$local_dir" "$subpath" "$verb" "$@"; then
     start_watcher "$local_dir" "$subpath" "$regex" "$@"
     return 0
   fi
   return 1
 }
 
-# Install restored custom nodes' Python deps into the fresh venv. restore-
-# dependencies handles each node's requirements.txt; the sweep runs any
-# install.py the node ships (first-install side effects pip won't do).
-install_node_deps() {
-  local cm_cli="$COMFY_DIR/custom_nodes/ComfyUI-Manager/cm-cli.py" np
-  if [ -f "$cm_cli" ]; then
-    log "installing node dependencies (cm-cli restore-dependencies)..."
-    # -u: unbuffered stdout/stderr. Without it, cm-cli's pip-install chatter
-    # sits in Python's block-buffered pipe and only appears (if at all) as one
-    # dump at process exit, since stdout isn't a tty here.
-    python3.12 -u "$cm_cli" restore-dependencies \
-      || log "WARNING: some node deps failed to install — check the logs."
-  fi
-  for np in "$COMFY_DIR"/custom_nodes/*/; do
-    if [ -f "${np}install.py" ]; then
-      log "running install.py for $(basename "$np")..."
-      ( cd "$np" && python3.12 -u install.py ) \
-        || log "WARNING: install.py failed for $(basename "$np")"
-    fi
+# Final sync of every armed dir (restore succeeded — the watchers' gate), in
+# parallel so it fits dstack's stop grace period.
+flush_mirrors() {
+  local marker args pids=()
+  for marker in "$MIRROR_STATE"/*; do
+    [ -f "$marker" ] || continue
+    mapfile -d '' -t args < "$marker"
+    log "final sync of ${args[1]} to R2..."
+    sync_up "${args[0]}" "${args[1]}" "${args[@]:3}" &
+    pids+=("$!")
   done
+  # Never a bare `wait`: it would also wait on the never-ending watchers.
+  [ "${#pids[@]}" -eq 0 ] || wait "${pids[@]}"
 }
 
-# Restore + mirror all five dirs. Blocking for custom_nodes + user (small,
-# required for a correct launch); backgrounded for input + models + output
-# (ComfyUI comes up while they stream). Each watcher is gated on its restore.
+# SIGTERM/SIGINT handler: forward the stop to /start.sh (it stops ComfyUI and
+# exits; it can't react while parked in `sleep infinity` after a ComfyUI crash,
+# hence the bounded wait), push the last changes to R2, exit.
+stop_and_flush() {
+  log "stop requested — stopping ComfyUI, then a final sync to R2"
+  kill -TERM "$1" 2>/dev/null
+  for _ in $(seq 1 30); do kill -0 "$1" 2>/dev/null || break; sleep 1; done
+  flush_mirrors
+  exit 0
+}
+
+# Run a command (the base image's /start.sh) as a child instead of exec'ing it,
+# so the mirrors get a final sync when the pod stops: dstack sends SIGTERM and
+# allows stop_duration (default 5m) before SIGKILL. Returns the child's status.
+supervise() {
+  local child=
+  trap 'stop_and_flush "$child"' TERM INT
+  "$@" &
+  child=$!
+  wait "$child"
+  local rc=$?
+  log "$1 exited $rc"
+  flush_mirrors
+  return "$rc"
+}
+
+# Install restored custom nodes' Python deps into the system site-packages (the
+# venv /start.sh creates next inherits them via --system-site-packages).
+# restore-dependencies covers each node's requirements.txt AND its install.py.
+install_node_deps() {
+  local cm_cli="$COMFY_DIR/custom_nodes/ComfyUI-Manager/cm-cli.py"
+  if [ ! -f "$cm_cli" ]; then
+    log "WARNING: no ComfyUI-Manager in custom_nodes — node deps NOT installed"
+    return
+  fi
+  log "installing node dependencies (cm-cli restore-dependencies)..."
+  # -u: unbuffered stdout/stderr. Without it, cm-cli's pip-install chatter
+  # sits in Python's block-buffered pipe and only appears (if at all) as one
+  # dump at process exit, since stdout isn't a tty here.
+  python3.12 -u "$cm_cli" restore-dependencies \
+    || log "WARNING: some node deps failed to install — check the logs."
+}
+
+# Restore + mirror all five dirs, each watcher gated on its restore.
+#
+# Blocking: custom_nodes, user, input, output — everything ComfyUI reads at
+# startup or writes on its own. output MUST land before ComfyUI starts: it
+# numbers new files from what's on disk, so on a not-yet-restored output/ it
+# reuses ComfyUI_00001_.png and the restore then overwrites the new image with
+# the old one. Nothing on the pod is newer than R2 yet, so these restore with
+# `sync`: the pod becomes an exact copy instead of R2 + the baked tree (a baked
+# node pack you uninstalled would otherwise come back and be re-mirrored).
+#
+# Background: models — the bulk of the bytes; ComfyUI comes up while it
+# streams. `copy`, not `sync`: a model downloaded mid-restore must survive.
 start_r2_persistence() {
-  # custom_nodes: restore -> install deps -> gated watcher.
-  if restore_dir "$COMFY_DIR/custom_nodes" custom_nodes "${GLOBAL_RCLONE_EXCLUDES[@]}"; then
+  rm -rf "$MIRROR_STATE"; mkdir -p "$MIRROR_STATE"
+
+  if restore_dir "$COMFY_DIR/custom_nodes" custom_nodes sync "${GLOBAL_RCLONE_EXCLUDES[@]}"; then
     install_node_deps
     start_watcher "$COMFY_DIR/custom_nodes" custom_nodes "$GLOBAL_INOTIFY_EXCLUDE" "${GLOBAL_RCLONE_EXCLUDES[@]}"
   else
     log "custom_nodes restore failed — skipping node dep install + watcher (protecting R2)"
   fi
 
-  # user: restore -> gated watcher.
-  restore_and_watch "$COMFY_DIR/user" user "$USER_INOTIFY_EXCLUDE" "${USER_RCLONE_EXCLUDES[@]}" \
+  restore_and_watch "$COMFY_DIR/user" user sync "$USER_INOTIFY_EXCLUDE" "${USER_RCLONE_EXCLUDES[@]}" \
     || log "user restore failed — skipping its watcher (protecting R2)"
+  local subpath
+  for subpath in input output; do
+    restore_and_watch "$COMFY_DIR/$subpath" "$subpath" sync "$GLOBAL_INOTIFY_EXCLUDE" "${GLOBAL_RCLONE_EXCLUDES[@]}" \
+      || log "$subpath restore failed — skipping its watcher (protecting R2)"
+  done
 
-  # input + models + output: background restore -> gated watcher (stream in),
-  # one at a time. Sequenced (not parallel `&` jobs) because two concurrent
-  # rclone copies each running --transfers/--checkers 16 contend for R2
-  # connections — observed stalling the models restore's last stragglers to
-  # near-0 B/s for minutes right as output's small batch was mid-transfer
-  # alongside it. Chained in one background job so ComfyUI startup still isn't
-  # blocked. `input` goes first in the chain: it's small, and a workflow queued
-  # right after boot needs its source images, so it must not wait behind a
-  # models restore measured in tens of GB.
-  (
-    restore_and_watch "$COMFY_DIR/input" input "$GLOBAL_INOTIFY_EXCLUDE" "${GLOBAL_RCLONE_EXCLUDES[@]}" \
-      || log "input restore failed — skipping its watcher (protecting R2)"
-    restore_and_watch "$COMFY_DIR/models" models "$GLOBAL_INOTIFY_EXCLUDE" "${GLOBAL_RCLONE_EXCLUDES[@]}" \
+  { restore_and_watch "$COMFY_DIR/models" models copy "$GLOBAL_INOTIFY_EXCLUDE" "${GLOBAL_RCLONE_EXCLUDES[@]}" \
       || log "models restore failed — skipping its watcher (protecting R2)"
-    restore_and_watch "$COMFY_DIR/output" output "$GLOBAL_INOTIFY_EXCLUDE" "${GLOBAL_RCLONE_EXCLUDES[@]}" \
-      || log "output restore failed — skipping its watcher (protecting R2)"
-  ) &
+  } &
 }
 
 # When sourced by the test harness, stop here: define lib, skip the boot flow.
@@ -247,8 +316,9 @@ fi
 # This forces a real CUDA allocation with the image's CUDA-13 torch — the same
 # op that would otherwise crash ComfyUI. On an old-driver host it raises
 # "driver is too old" and python exits non-zero; on a good host it's a no-op.
-if ! python3.12 -c "import torch; torch.zeros(1, device='cuda')" 2>/dev/null; then
-  log "CUDA 13 unusable on this host (driver too old?) — exiting 1 so dstack retries another host."
+# Its error stays in the log, so a broken image isn't mistaken for a bad host.
+if ! python3.12 -c "import torch; torch.zeros(1, device='cuda')"; then
+  log "CUDA 13 unusable on this host (error above) — exiting 1 so dstack retries another host."
   exit 1
 fi
 log "CUDA 13 preflight OK."
@@ -258,7 +328,7 @@ if [ -n "${RCLONE_CONFIG_R2_ACCESS_KEY_ID:-}" ] && [ -n "${R2_BUCKET:-}" ] && [ 
   export RCLONE_CONFIG_R2_ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
   R2=1; log "R2 persistence enabled (bucket: $R2_BUCKET)"
 else
-  log "R2 not configured — no persistence (custom_nodes/user/models/output not restored or mirrored)"
+  log "R2 not configured — no persistence (nothing restored or mirrored)"
 fi
 
 # 1) Fresh disk: populate ComfyUI ourselves so we can modify it before launch.
@@ -268,9 +338,9 @@ if [ ! -d "$COMFY_DIR" ]; then
   cp -r "$BAKED" "$COMFY_DIR"
 fi
 
-# Restore state from R2 and start the directory mirrors. Blocking restores
-# (custom_nodes + user) finish before ComfyUI launches; models + output stream
-# in the background. Skipped entirely when R2 isn't configured.
+# Restore state from R2 and start the directory mirrors. custom_nodes, user,
+# input, and output finish before ComfyUI launches; models streams in the
+# background. Skipped entirely when R2 isn't configured.
 if [ "$R2" = 1 ]; then
   start_r2_persistence
 fi
@@ -300,5 +370,5 @@ if ! grep -qx -- '--listen 127.0.0.1' "$COMFY_ARGS_FILE" 2>/dev/null; then
   log "pinned ComfyUI to 127.0.0.1 via $COMFY_ARGS_FILE (Manager's non-default-channel install gate)"
 fi
 
-log "handing off to /start.sh"
-exec /start.sh
+log "starting /start.sh"
+supervise /start.sh

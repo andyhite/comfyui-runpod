@@ -14,7 +14,9 @@
 # (a) whitelist CUDA-13 GPU architectures and (b) the entrypoint runs a CUDA
 # preflight that exits non-zero on an old-driver host so dstack retries another.
 # RunPod runs x86_64 — always build for linux/amd64.
-FROM runpod/comfyui:cuda13.0
+# Pinned by digest (multi-arch index; tag kept for readability). Bump:
+#   docker buildx imagetools inspect runpod/comfyui:cuda13.0   # copy "Digest:"
+FROM runpod/comfyui:cuda13.0@sha256:094dc6d79448b6f118c4d2b054073f92d765c568598e7a96aaeda678a6bcbf3b
 
 # The ComfyUI release this image ships. RunPod's ComfyUI bumps lag upstream by
 # weeks (runpod/comfyui:cuda13.0 bakes v0.30.0 as of bundle 1.4.7), so the
@@ -23,14 +25,19 @@ FROM runpod/comfyui:cuda13.0
 # Releases: https://github.com/comfyanonymous/ComfyUI/releases
 ARG COMFYUI_VERSION=v0.36.0
 
-# rclone — R2 restore + the per-directory mirror. Installed from rclone's
-# official script, NOT apt: the distro package is old enough to not recognise
-# the `Cloudflare` S3 provider (added in rclone v1.59), so it logs
-# `provider "Cloudflare" not known` on every call and falls back to generic S3.
-# The upstream build also has saner multi-thread transfer defaults.
+# rclone — R2 restore + the per-directory mirror. Pinned release, NOT apt: the
+# distro package predates the `Cloudflare` S3 provider (rclone v1.59). Bump:
+# new version from https://downloads.rclone.org/version.txt, sha256 from
+# https://downloads.rclone.org/<ver>/SHA256SUMS (linux-amd64.zip).
 # inotify-tools — the entrypoint's directory watchers (inotifywait).
+ARG RCLONE_VERSION=v1.75.1
+ARG RCLONE_SHA256=982b5aa772841168f8e380f139e9e787b2a105403e32b94da8676a0e1c0a13ab
 RUN apt-get update && apt-get install -y --no-install-recommends inotify-tools curl unzip ca-certificates \
- && curl -fsSL https://rclone.org/install.sh | bash \
+ && curl -fsSL -o /tmp/rclone.zip "https://downloads.rclone.org/${RCLONE_VERSION}/rclone-${RCLONE_VERSION}-linux-amd64.zip" \
+ && echo "${RCLONE_SHA256}  /tmp/rclone.zip" | sha256sum -c - \
+ && unzip -j /tmp/rclone.zip '*/rclone' -d /usr/local/bin \
+ && chmod 0755 /usr/local/bin/rclone \
+ && rm -f /tmp/rclone.zip \
  && rm -rf /var/lib/apt/lists/*
 
 # Move the baked ComfyUI to $COMFYUI_VERSION.
@@ -44,12 +51,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends inotify-tools c
 # carrying a second copy of ComfyUI in this layer.
 #
 # The requirements install is NOT optional: /start.sh builds the pod's venv with
-# `--system-site-packages --without-pip` and never installs requirements.txt, so
-# every ComfyUI dep (comfyui-frontend-package, workflow templates, comfy-kitchen
-# …) has to be in the image's system site-packages at the versions this release
-# pins. PIP_CONSTRAINT is the base image's torch pin (torch==2.10.0+cu130), and
-# it travels with the matching index: without both, a resolver nudge on torch
-# swaps the CUDA-13 build for a stock one and the CUDA preflight then fails.
+# `python3.12 -m venv --system-site-packages` (then `ensurepip`) and never
+# installs requirements.txt, so every ComfyUI dep (comfyui-frontend-package,
+# workflow templates, comfy-kitchen …) has to be in the image's system
+# site-packages at the versions this release pins. PIP_CONSTRAINT is the base
+# image's torch pin (torch==2.10.0+cu130), and it travels with the matching
+# index: without both, a resolver nudge on torch swaps the CUDA-13 build for a
+# stock one and the CUDA preflight then fails.
 RUN set -eux; \
     cd /opt/comfyui-baked; \
     git fetch --depth 1 --no-tags origin "refs/tags/${COMFYUI_VERSION}:refs/tags/${COMFYUI_VERSION}"; \
@@ -76,7 +84,7 @@ RUN PIP_BREAK_SYSTEM_PACKAGES=1 \
     PIP_CONSTRAINT=/opt/comfyui-runtime-constraints.txt \
     PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu130 \
     python3.12 -m pip install --no-cache-dir \
-      "https://github.com/snw35/sageattention-wheel/releases/download/cu12-2.2.0-cu13-2.2.0/sageattention-2.2.0%2Bcu13-cp312-cp312-linux_x86_64.whl"
+      "https://github.com/snw35/sageattention-wheel/releases/download/cu12-2.2.0-cu13-2.2.0/sageattention-2.2.0%2Bcu13-cp312-cp312-linux_x86_64.whl#sha256=60531840b2e8f1a8c8d369cfb774a50b8f82c714685efcc7bbfd92ee4b209605"
 
 # Last, so editing it — the usual reason to rebuild — invalidates nothing else.
 COPY --chmod=0755 entrypoint.sh /usr/local/bin/dstack-entry.sh

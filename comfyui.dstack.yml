@@ -29,14 +29,12 @@ retry:
 # Secrets (set once with `dstack secret set <NAME> <value>`) — keeps account-
 # specific values out of this public repo. The entrypoint builds the R2 endpoint
 # from R2_ACCOUNT_ID.
-#   HF_TOKEN   kept for nodes that call HF at runtime; no longer used for model
-#              seeding (R2 is the sole model source)
+#   HF_TOKEN   for Hugging Face downloads on the pod (gated repos need it)
 #   R2_ACCOUNT_ID         your Cloudflare account id (for the R2 endpoint)
 #   R2_ACCESS_KEY_ID      from a Cloudflare R2 API token (Object Read & Write)
 #   R2_SECRET_ACCESS_KEY  ditto
-# The R2 secrets enable persistence for ALL five mirrored dirs (custom_nodes,
-# user, models, input, output). Omit them and the pod still runs, but with NO
-# persistence — nothing is restored at boot and nothing is mirrored back.
+# All four must exist: dstack terminates a run whose config references an unset
+# secret. The R2 ones enable persistence for all five mirrored dirs.
 env:
   - HF_TOKEN=${{ secrets.HF_TOKEN }}
   # Let pip find the image's CUDA-pinned torch wheel when ComfyUI-Manager (or the
@@ -74,7 +72,8 @@ resources:
   #   RTXPRO6000 / B200       -  above $1.50, so never offered here
   # dstack always takes the CHEAPEST match, so the name list is the only knob
   # that picks a card: adding RTXPRO4500 back means always getting a 4500, not
-  # a 5090. Keep this list and the fleet's (comfyui-fleet.dstack.yml) identical.
+  # a 5090. `make up-cheap` swaps this list for the Makefile's CHEAP_GPU (the
+  # whole menu); comfyui-fleet.dstack.yml's spec must cover both.
   gpu:
     name: [RTX5090, RTXPRO5000]
     memory: 32GB..
@@ -91,10 +90,11 @@ utilization_policy:
   min_gpu_utilization: 10
   time_window: 30m
 
-# No `commands`: the custom image's entrypoint restores custom_nodes + user from
-# R2 (blocking), installs node deps, streams input + models + output from R2 in
-# the background, starts a watcher per dir that mirrors it back to R2, then
-# execs the base image's /start.sh.
+# No `commands`: the custom image's entrypoint restores custom_nodes, user,
+# input, and output from R2 (blocking), installs node deps, streams models from
+# R2 in the background, starts a watcher per dir that mirrors it back to R2,
+# then runs the base image's /start.sh — and gives every mirrored dir a final
+# sync when the run stops (dstack allows stop_duration, default 5m).
 #
 # Persistence is via R2 (see env above): R2 is an exact mirror of
 # custom_nodes/, user/, models/, input/, and output/.

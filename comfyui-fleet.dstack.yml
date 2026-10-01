@@ -10,22 +10,23 @@ backends: [runpod]
 # On-demand only (no spot reclaim mid-generation).
 spot_policy: on-demand
 
-# nodes: 0..1 = provision the instance on demand when a run is submitted, and
-# scale back to 0 when idle so you don't pay between generations.
+# nodes: 0..1 = provision the instance on demand when a run is submitted. On
+# RunPod the pod is deleted as soon as the run ends (dstack forces a zero idle
+# time on container-based backends), so nothing bills between sessions;
+# idle_duration only caps idle time should that ever change.
 nodes: 0..1
 idle_duration: 1h
 
 resources:
-  # Superset of both task modes' gpu specs (comfyui.dstack.yml pins RTX5090;
-  # comfyui-cheap.dstack.yml floats across the whole Blackwell menu) — the
-  # CUDA-13 image wants an R580+ host driver, which on RunPod means a
-  # Blackwell host. Keep this list/memory floor in sync with whichever task
-  # file has the loosest spec (currently comfyui-cheap.dstack.yml).
+  # Superset of both launch modes' gpu specs (comfyui.dstack.yml pins RTX5090;
+  # `make up-cheap` swaps in the Makefile's CHEAP_GPU, the whole Blackwell
+  # menu) — the CUDA-13 image wants an R580+ host driver, which on RunPod means
+  # a Blackwell host. Keep this list/memory floor in sync with CHEAP_GPU.
   #
-  # Both task files set `fleets: [comfyui]`, so they only provision into this
+  # The task file sets `fleets: [comfyui]`, so runs only provision into this
   # fleet (not the looser `ollama` one, which used to hand us an RTXPRO4000).
-  # Each task's own name list is the binding filter per run; this fleet spec
-  # just has to be able to satisfy either.
+  # Each run's own name list is the binding filter; this fleet spec just has
+  # to be able to satisfy either mode.
   gpu:
     name: [RTXPRO4000, RTXPRO4500, RTX5090, RTXPRO5000]
     memory: 24GB..
