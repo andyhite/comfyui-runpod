@@ -28,6 +28,10 @@ export COMFYUI_PATH="$COMFY_DIR"
 # before /start.sh runs — without it a node requirement can swap the CUDA-13
 # torch for a stock build.
 export PIP_CONSTRAINT=/opt/comfyui-runtime-constraints.txt
+# Containers run as root by design, and pip is pinned by the base image: mute
+# the per-install root-user warning and the "new release" notice. Exported
+# here so boot-time restores and ComfyUI-Manager's in-UI installs both inherit it.
+export PIP_ROOT_USER_ACTION=ignore PIP_DISABLE_PIP_VERSION_CHECK=1
 # One file per watched dir, holding its push args: exactly the dirs the shutdown
 # flush may push to R2.
 MIRROR_STATE=/tmp/r2-mirrors
